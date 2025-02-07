@@ -1,6 +1,5 @@
 from ncclient import manager
 
-# Device connection details
 device = {
     "host": "10.133.35.148",
     "port": 830,
@@ -9,24 +8,17 @@ device = {
     "hostkey_verify": False
 }
 
-# RPC Subscription XML
-rpc_subscription = """
-<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
-    <create-subscription xmlns="urn:ietf:params:xml:ns:netconf:notification:1.0">
+with manager.connect(**device) as m:
+    rpc = '''
+    <create-subscription xmlns="urn:ietf:params:xml:ns:yang:ietf-netconf-notifications">
         <stream>NETCONF</stream>
     </create-subscription>
-</rpc>
-"""
+    '''
+    response = m.dispatch(rpc)
+    print(response)
 
-# Connect to the device
-with manager.connect(**device) as m:
-    # Send RPC Subscription
-    response = m.dispatch(rpc_subscription)
-    print("Subscription Response:\n", response)
-
-    # Listen for notifications
-    print("\nWaiting for notifications...\n")
+    # Listening for notifications
     while True:
-        notification = m.take_notification()
-        if notification:
-            print("Received Notification:\n", notification.notification_xml)
+        notif = m.take_notification(timeout=60)
+        if notif:
+            print(notif.notification_xml)
