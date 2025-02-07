@@ -26,3 +26,13 @@
         </filter>
     </get>
 </rpc>
+
+
+
+
+
+<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="101">
+    <create-subscription xmlns="urn:ietf:params:xml:ns:netconf:notification:1.0">
+        <stream>NETCONF</stream>
+    </create-subscription>
+</rpc>
