@@ -1,68 +1,40 @@
 
-<rpc message-id="2" xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
-    <get>
-        <filter type="subtree">
-            <netconf-state xmlns="urn:ietf:params:xml:ns:yang:ietf-netconf-monitoring"/>
-        </filter>
-    </get>
-</rpc>
+
+
+test.xml:
+---------
+<nacm xmlns="urn:ietf:params:xml:ns:yang:ietf-netconf-acm">
+    <enable-nacm>false</enable-nacm>
+</nacm>
 
 
 
-<rpc message-id="1" xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
-    <get>
-        <filter type="subtree">
-            <capabilities xmlns="urn:ietf:params:xml:ns:yang:ietf-netconf-monitoring"/>
-        </filter>
-    </get>
-</rpc>
+export code:
+--------------
 
+import subprocess
+import os
 
+def import_configuration_using_sysrepocfg(config_file):
+    try:
+        if not os.path.isfile(config_file):
+            print(f"Error: The file {config_file} does not exist.")
+            return
 
-<rpc message-id="1" xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
-    <get>
-        <filter type="subtree">
-            <capabilities xmlns="urn:ietf:params:xml:ns:yang:ietf-netconf-monitoring"/>
-        </filter>
-    </get>
-</rpc>
+        command = ["sysrepocfg", "--import", config_file,"--datastore", "running", "--module", "ietf-netconf-acm"]
+        result = subprocess.run(command, capture_output=True, text=True)
 
+        if result.returncode == 0:
+            print(f"Configuration from '{config_file}' successfully imported to Sysrepo.")
+        else:
+            print(f"Error occurred: {result.stderr}")
 
+    except Exception as e:
+        print(f"Error occurred: {e}")
 
-
-
-<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="101">
-    <create-subscription xmlns="urn:ietf:params:xml:ns:netconf:notification:1.0">
-        <stream>NETCONF</stream>
-    </create-subscription>
-</rpc>
-..
-
-
-
-
-
-
-<?xml version="1.0" encoding="UTF-8"?>
-<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="101">
-  <create-subscription xmlns="urn:ietf:params:xml:ns:netconf:notification:1.0">
-    <filter type="subtree">
-      <interfaces-state xmlns="urn:ietf:params:xml:ns:yang:ietf-interfaces"/>
-    </filter>
-  </create-subscription>
-</rpc>
-]]>]]>
-
-
-
-<?xml version="1.0"?>
-<nf:rpc xmlns:nf="urn:ietf:params:xml:ns:netconf:base:1.0"
-         xmlns:nxos="http://www.cisco.com/nxos:1.0" 
-         message-id="100">
-  <nxos:exec-command>
-    <nxos:cmd>show netconf-yang capabilities</nxos:cmd>
-  </nxos:exec-command>
-</nf:rpc>]]>]]>
+if __name__ == "__main__":
+    config_file = "/home/tcs/Sysrepository/Python/Sysrepocfg/test.xml"
+    import_configuration_using_sysrepocfg(config_file) 
 
 
 
@@ -75,21 +47,8 @@
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+import code:
+-------------
 
 import subprocess
 
