@@ -52,3 +52,14 @@
   </create-subscription>
 </rpc>
 ]]>]]>
+
+
+
+<?xml version="1.0"?>
+<nf:rpc xmlns:nf="urn:ietf:params:xml:ns:netconf:base:1.0"
+         xmlns:nxos="http://www.cisco.com/nxos:1.0" 
+         message-id="100">
+  <nxos:exec-command>
+    <nxos:cmd>show netconf-yang capabilities</nxos:cmd>
+  </nxos:exec-command>
+</nf:rpc>]]>]]>
