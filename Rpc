@@ -36,3 +36,19 @@
         <stream>NETCONF</stream>
     </create-subscription>
 </rpc>
+..
+
+
+
+
+
+
+<?xml version="1.0" encoding="UTF-8"?>
+<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="101">
+  <create-subscription xmlns="urn:ietf:params:xml:ns:netconf:notification:1.0">
+    <filter type="subtree">
+      <interfaces-state xmlns="urn:ietf:params:xml:ns:yang:ietf-interfaces"/>
+    </filter>
+  </create-subscription>
+</rpc>
+]]>]]>
