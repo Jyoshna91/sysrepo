@@ -1,0 +1,32 @@
+from ncclient import manager
+
+# Device connection details
+device = {
+    "host": "10.133.35.148",
+    "port": 830,
+    "username": "admin",
+    "password": "tcs123",
+    "hostkey_verify": False
+}
+
+# RPC Subscription XML
+rpc_subscription = """
+<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+    <create-subscription xmlns="urn:ietf:params:xml:ns:netconf:notification:1.0">
+        <stream>NETCONF</stream>
+    </create-subscription>
+</rpc>
+"""
+
+# Connect to the device
+with manager.connect(**device) as m:
+    # Send RPC Subscription
+    response = m.dispatch(rpc_subscription)
+    print("Subscription Response:\n", response)
+
+    # Listen for notifications
+    print("\nWaiting for notifications...\n")
+    while True:
+        notification = m.take_notification()
+        if notification:
+            print("Received Notification:\n", notification.notification_xml)
