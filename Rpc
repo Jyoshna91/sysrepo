@@ -142,3 +142,10 @@ def export_sysrepo_configuration(file_path, datastore="running", module="ietf-ne
 if __name__ == "__main__":
 
     export_sysrepo_configuration(file_path="/home/tcs/Sysrepository/Python/Sysrepocfg/export/ietf-netconf-acm_configuration.xml", datastore="running", module="ietf-netconf-acm", format="xml")
+
+
+
+
+
+
+
