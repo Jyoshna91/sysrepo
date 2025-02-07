@@ -1109,3 +1109,25 @@ try:
 except Exception as e:
     print(f"An error occurred: {e}")
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<rpc message-id="1" xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+    <create-subscription xmlns="urn:ietf:params:xml:ns:netconf:notification:1.0">
+        <filter type="subtree">
+            <interfaces xmlns="urn:ietf:params:xml:ns:yang:ietf-interfaces"/>
+        </filter>
+    </create-subscription>
+</rpc>
+
