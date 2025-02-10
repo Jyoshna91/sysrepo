@@ -1,0 +1,59 @@
+<notification xmlns="urn:ietf:params:xml:ns:netconf:notification:1.0">
+    <eventTime>2024-10-28T12:00:00Z</eventTime>
+    <ietf-netconf-notif:netconf-config-change xmlns:ietf-netconf-notif="urn:ietf:params:xml:ns:yang:ietf-netconf-notifications">
+        <changed-by>
+            <username>admin</username>
+            <session-id>42</session-id>
+            <source-host>192.168.1.100</source-host>
+        </changed-by>
+        <datastore>running</datastore>
+        <edit>
+            <target>/ietf-interfaces:interfaces/interface[name='eth0']</target>
+            <operation>replace</operation>
+        </edit>
+    </ietf-netconf-notif:netconf-config-change>
+</notification
+
+
+
+
+
+
+
+
+
+
+
+
+import subprocess
+import os
+import time
+from tkinter import Tk, messagebox
+
+def send_sysrepo_notification(notification_file):
+    try:
+        if not os.path.isfile(notification_file):
+            print(f"Error: The file {notification_file} does not exist.")
+            return
+
+        command = ["sysrepocfg", "--notification", notification_file]
+        result = subprocess.run(command, capture_output=True, text=True)
+
+        if result.returncode == 0:
+            print(f"Notification from '{notification_file}' successfully sent.")
+            show_popup("Notification Sent", f"Notification from {notification_file} was sent successfully.")
+        else:
+            print(f"Error occurred: {result.stderr}")
+
+    except Exception as e:
+        print(f"Error occurred: {e}")
+
+def show_popup(title, message):
+    root = Tk()
+    root.withdraw()  # Hide main window
+    messagebox.showinfo(title, message)
+    root.destroy()
+
+if __name__ == "__main__":
+    notification_file = "/home/tcs/Sysrepository/Python/Sysrepocfg/notification.xml"
+    send_sysrepo_notification(notification_file)
