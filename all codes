@@ -1,0 +1,288 @@
+export.py
+---------
+import subprocess
+
+def export_sysrepo_configuration(file_path, datastore="running", module="ietf-netconf-acm", format="xml"):
+    command = ["sysrepocfg", "--export"]
+
+    if file_path:
+        command.append(file_path)
+    if datastore:
+        command.extend(["--datastore", datastore])
+    if module:
+        command.extend(["--module", module])
+    if format:
+        command.extend(["--format", format])
+
+    try:
+
+        result = subprocess.run(command, capture_output=True, text=True, check=True)
+        print(f"Export successful:\n{result.stdout}")
+
+    except subprocess.CalledProcessError as e:
+        print(f"Error occurred while executing the export command: {e.stderr}")
+
+    except FileNotFoundError:
+        print("sysrepocfg command not found. Please ensure sysrepocfg is installed and available in the PATH.")
+
+    except Exception as e:
+        print(f"An unexpected error occurred: {str(e)}")
+
+if __name__ == "__main__":
+
+    export_sysrepo_configuration(file_path="/home/tcs/NETCONF/Sysrepo/ietf-nacm.xml", datastore="running", module="ietf-netconf-acm", format="xml")
+
+
+
+
+import.py
+---------
+
+import.pyimport subprocess
+import os
+
+def import_configuration_using_sysrepocfg(config_file):
+    try:
+        if not os.path.isfile(config_file):
+            print(f"Error: The file {config_file} does not exist.")
+            return
+
+        command = ["sysrepocfg", "--import", config_file,"--datastore", "running", "--module", "ietf-netconf-acm"]
+        result = subprocess.run(command, capture_output=True, text=True)
+
+        if result.returncode == 0:
+            print(f"Configuration from '{config_file}' successfully imported to Sysrepo.")
+        else:
+            print(f"Error occurred: {result.stderr}")
+
+    except Exception as e:
+        print(f"Error occurred: {e}")
+
+if __name__ == "__main__":
+    config_file = "/home/tcs/NETCONF/Sysrepo/test.xml"
+    import_configuration_using_sysrepocfg(config_file) 
+
+
+
+
+
+install.py
+-----------
+
+import os
+import subprocess
+import logging
+from collections import defaultdict
+
+class GetImport:
+    def __init__(self, root_directory=None, module_folder=None, log_file="module_installation.log"):
+        self.parsed_yang = set()  # Tracks parsed YANG modules
+        self.install_order = []  # Order of modules to install
+        self.submodule_order = []  # Order of submodules to install
+        self.root_directory = root_directory or "/home/tcs/NETCONF/Sysrepo_scripts/public-master/release/models"
+        self.module_folder = module_folder
+        self.log_file = log_file
+
+        logging.basicConfig(filename=self.log_file, level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+        self.logger = logging.getLogger()
+
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.CRITICAL)
+        self.logger.addHandler(console_handler)
+
+        self.module_cache = {}  # Cache for module paths
+        self.scan_modules()
+
+    def scan_modules(self):
+        """Scan the provided module folder, identify YANG imports, and prepare modules for installation."""
+        try:
+            if not self.module_folder:
+                self.module_folder = input("Please enter the module folder you want to install: ").strip()
+
+            if not os.path.isdir(self.module_folder):
+                self.logger.error(f"Error: {self.module_folder} is not a valid directory.")
+                return
+
+            # Cache all module paths
+            self._cache_modules(self.module_folder)
+
+            # Parse modules and prepare the install order
+            self._parse_modules()
+
+            # Install the modules in the correct order
+            self.install_modules()
+
+        except FileNotFoundError as e:
+            self.logger.error(f"Error: Directory not found: {e}")
+        except Exception as e:
+            self.logger.error(f"An error occurred: {e}")
+
+    def _cache_modules(self, dir_path):
+        """Cache all module paths for fast lookups."""
+        try:
+            for root, dirs, files in os.walk(dir_path):
+                for file_name in files:
+                    if file_name.endswith(".yang"):
+                        file_path = os.path.join(root, file_name)
+                        self.module_cache[file_name] = file_path
+        except Exception as e:
+            self.logger.error(f"Error while caching modules from {dir_path}: {e}")
+
+    def _parse_modules(self):
+        """Parse modules and determine the install order based on their dependencies."""
+        visited_files = set()  # To avoid re-parsing the same file
+
+        try:
+            for file_path in self.module_cache.values():
+                if file_path not in visited_files:
+                    visited_files.add(file_path)
+                    self._parse_recursively(file_path)
+        except Exception as e:
+            self.logger.error(f"Error while parsing modules: {e}")
+
+    def _parse_recursively(self, file_path):
+        """Parse a module recursively for imports and identify dependencies."""
+        try:
+            with open(file_path, "r") as file:
+                for line in file:
+                    line = line.strip()
+                    if line.startswith("import "):
+                        module_name = line.split()[1]
+                        if module_name not in self.parsed_yang:
+                            self.logger.info(f"Importing: {module_name}")
+                            new_file_path = self.find_import_path(module_name)
+                            if new_file_path:
+                                self._parse_recursively(new_file_path)
+                                self.parsed_yang.add(module_name)
+                            else:
+                                self.logger.warning(f"Module {module_name} not found in the directory tree.")
+
+            # Add the module to install order and manage main/submodule order
+            if file_path not in self.install_order and file_path not in self.submodule_order:
+                if self.is_submodule(file_path):
+                    main_module_path = self.get_main_module(file_path)
+                    if main_module_path and main_module_path not in self.install_order:
+                        self.install_order.append(main_module_path)
+                        self.logger.info(f"Queued main module {main_module_path} for installation")
+
+                self.install_order.append(file_path)
+                self.logger.info(f"Queued {file_path} for installation")
+
+        except Exception as e:
+            self.logger.error(f"Error processing {file_path}: {e}")
+
+    def find_import_path(self, module_name):
+        """Find the full path of an imported module."""
+        return self.module_cache.get(f"{module_name}.yang")
+
+    def is_submodule(self, file_path):
+        """Determine if the YANG file is a submodule."""
+        try:
+            with open(file_path, "r") as file:
+                for line in file:
+                    if "submodule" in line:
+                        return True
+        except Exception as e:
+            self.logger.error(f"Error checking if {file_path} is a submodule: {e}")
+        return False
+
+    def get_main_module(self, submodule_path):
+        """Get the corresponding main module for a submodule."""
+        try:
+            with open(submodule_path, "r") as file:
+                for line in file:
+                    if line.strip().startswith("module "):  # Simplistic assumption for main module
+                        return submodule_path.replace("submodule", "module")
+        except Exception as e:
+            self.logger.error(f"Error finding main module for {submodule_path}: {e}")
+        return None
+
+    def install_modules(self):
+        """Install all modules in the correct order."""
+        print("Installing modules in the following order:")
+
+        # Merge both lists to ensure the correct order (main modules first, submodules second)
+        all_modules = self.install_order + self.submodule_order
+
+        if not all_modules:
+            self.logger.warning("No modules found to install.")
+            return
+
+        # Install each module
+        for module in all_modules:
+            self._install_module(module)
+
+    def _install_module(self, file_path):
+        """Install a single YANG module using sysrepoctl."""
+        try:
+            print(f"Installing YANG module: {file_path}")
+            result = subprocess.run(["sysrepoctl", "--install", file_path], check=True, capture_output=True)
+            if result.returncode == 0:
+                self.logger.info(f"Successfully installed {file_path}")
+                print(f"Successfully installed {file_path}")
+            else:
+                self.logger.error(f"Failed to install {file_path}: {result.stderr.decode()}")
+                print(f"Failed to install {file_path}: {result.stderr.decode()}")
+
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"Failed to install {file_path}: {e}")
+            print(f"Failed to install {file_path}: {e}")
+
+if __name__ == "__main__":
+    get_import = GetImport()
+
+
+
+permissions.py
+---------------
+
+
+import sysrepo
+import subprocess
+
+def connect_sysrepo():
+    connection = sysrepo.SysrepoConnection()
+    session = connection.start_session()
+    return session
+
+def change_permissions(module_name, permissions):
+
+    print(f"{module_name} Permission Details :")
+
+    command1 = ['sysrepoctl --list | grep openconfig-acl']
+    command = ['sysrepoctl', '--change', module_name, '--permissions', str(permissions)]
+    try:
+        subprocess.run(command1, check=True, shell=True)
+
+        subprocess.run(command, check=True)
+        print(f"Successfully changed permissions for module: {module_name} to {permissions}")
+
+        subprocess.run(command1, check=True, shell=True)
+
+    except subprocess.CalledProcessError as e:
+        print(f"Error changing permissions for module: {module_name}. Error: {e}")
+
+if __name__ == "__main__":
+
+    session = connect_sysrepo()
+    module_name = 'openconfig-acl'
+    change_permissions(module_name, 600)
+
+
+
+
+main.py
+--------
+
+
+import install1
+import import1
+import export
+
+if __name__ == "__main__":
+   import1.export_sysrepo_configuration(file_path="/home/tcs/NETCONF/Sysrepo/ietf-nacm.xml", datastore="running", module="ietf-netconf-acm", format="xml")
+
+
+
+
+
