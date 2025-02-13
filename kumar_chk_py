@@ -1,0 +1,103 @@
+module oven {
+    namespace "http://example.com/ns/oven";
+    prefix ov;
+
+    container oven-state {
+        leaf temperature {
+            type int32;
+            description "Current temperature of the oven";
+        }
+        leaf mode {
+            type enumeration {
+                enum "off";
+                enum "bake";
+                enum "broil";
+                enum "toast";
+            }
+            description "Current mode of the oven";
+        }
+    }
+
+    notification mode-change {
+        description "Notification for oven mode change";
+        leaf new-mode {
+            type enumeration {
+                enum "off";
+                enum "bake";
+                enum "broil";
+                enum "toast";
+            }
+            description "The new mode of the oven";
+        }
+    }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+import sysrepo as sr
+import time
+
+def oven_change_cb(session, module_name, event, private_data):
+    if event == sr.SR_EV_CHANGE:
+        it = session.get_changes_iter("/oven:oven-state//*")
+        while True:
+            change = session.get_change_next(it)
+            if change is None:
+                break
+            print(f"Changed: {change.xpath} {change.oper} {change.prev_val} {change.new_val}")
+            if change.xpath == "/oven:oven-state/mode" and change.oper == sr.SR_OP_MODIFIED:
+                notify_mode_change(change.new_val)
+
+    return sr.SR_ERR_OK
+
+def notify_mode_change(new_mode):
+    conn = sr.Connection("oven_application")
+    session = sr.Session(conn, sr.SR_DS_RUNNING)
+    notification = sr.Val("mode-change", sr.SR_CONTAINER_T)
+    notification.set_leaf("/oven:mode-change/new-mode", new_mode)
+    session.notification_send(notification)
+    print(f"Notification sent for mode change to: {new_mode}")
+
+def setup_oven_module():
+    conn = sr.Connection("oven_application")
+    session = sr.Session(conn, sr.SR_DS_RUNNING)
+    subscribe = sr.Subscribe(session)
+
+    subscribe.module_change_subscribe("oven", oven_change_cb)
+    print("Subscribed to oven module changes.")
+
+    oven_state = {
+        "temperature": 180,
+        "mode": "bake"
+    }
+    session.set_item("/oven:oven-state/temperature", oven_state["temperature"])
+    session.set_item("/oven:oven-state/mode", oven_state["mode"])
+    session.commit()
+
+    print("Initial oven state set.")
+
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\nApplication terminated.")
+
+    subscribe.unsubscribe()
+    session.session_stop()
+    conn.disconnect()
+
+if __name__ == "__main__":
+    setup_oven_module()
+
