@@ -1,0 +1,292 @@
+Sure! Below is a more detailed explanation with actual commands and code for setting up sysrepo, libyang, libnetconf2, Netopeer2, gRPC, and gnmi on your Ubuntu system. I will go step by step, explaining each process with actual code and commands.
+
+1. Update and Install Dependencies
+Start by ensuring your Ubuntu system is updated and install essential dependencies.
+
+bash
+Copy
+# Update your system
+sudo apt-get update
+sudo apt-get upgrade -y
+
+# Install the necessary build dependencies
+sudo apt-get install cmake build-essential libpcre3-dev libavl-dev \
+libprotobuf-c-dev protobuf-c-compiler libev-dev libssl-dev pkg-config \
+libxml2-dev libboost-dev libboost-filesystem-dev libboost-system-dev \
+libboost-thread-dev libyaml-dev libprotobuf-dev protobuf-compiler \
+golang-go git
+2. Install libyang
+libyang is required to parse and validate YANG models. Follow these steps to install it:
+
+bash
+Copy
+# Clone the libyang repository from GitHub
+git clone https://github.com/CESNET/libyang.git
+
+# Navigate into the libyang directory
+cd libyang
+
+# Create a build directory
+mkdir build && cd build
+
+# Run cmake to configure the build
+cmake ..
+
+# Compile the code
+make
+
+# Install libyang
+sudo make install
+
+# Verify the installation
+pkg-config --modversion libyang
+3. Install Sysrepo
+sysrepo is a YANG-based datastore that works with libyang to store configuration data. Here's how to install it:
+
+bash
+Copy
+# Clone the sysrepo repository from GitHub
+git clone https://github.com/sysrepo/sysrepo.git
+
+# Navigate into the sysrepo directory
+cd sysrepo
+
+# Create a build directory
+mkdir build && cd build
+
+# Run cmake to configure the build
+cmake ..
+
+# Compile the sysrepo code
+make
+
+# Install sysrepo
+sudo make install
+
+# Initialize sysrepo (creates the necessary sysrepo directories and databases)
+sudo sysrepoctl --init
+
+# Verify sysrepo installation by listing installed modules
+sysrepoctl -l
+4. Install Netopeer2
+Netopeer2 is the NETCONF server that works with libnetconf2 to allow network device management.
+
+bash
+Copy
+# Clone the Netopeer2 repository from GitHub
+git clone https://github.com/CESNET/Netopeer2.git
+
+# Navigate into the Netopeer2 directory
+cd Netopeer2
+
+# Create a build directory
+mkdir build && cd build
+
+# Run cmake to configure the build
+cmake ..
+
+# Compile the Netopeer2 code
+make
+
+# Install Netopeer2
+sudo make install
+
+# Start the Netopeer2 server
+sudo netopeer2-server
+5. Install CMocka (Testing Framework)
+CMocka is a unit testing framework required for testing libnetconf2 and Netopeer2. Here's how to install it:
+
+bash
+Copy
+# Install build dependencies
+sudo apt-get install build-essential cmake git
+
+# Clone the CMocka repository from GitHub
+git clone https://git.cryptomilk.org/projects/cmocka.git
+
+# Navigate into the CMocka directory
+cd cmocka
+
+# Create a build directory
+mkdir build && cd build
+
+# Run cmake to configure the build
+cmake ..
+
+# Compile the CMocka code
+make
+
+# Install CMocka
+sudo make install
+
+# Update the dynamic linker run-time bindings
+sudo ldconfig
+
+# Verify CMocka installation
+pkg-config --modversion cmocka
+6. Install libnetconf2
+libnetconf2 is a library that implements the NETCONF protocol, which is used for communication with network devices.
+
+bash
+Copy
+# Clone the libnetconf2 repository from GitHub
+git clone https://github.com/CESNET/libnetconf2.git
+
+# Navigate into the libnetconf2 directory
+cd libnetconf2
+
+# Run cmake to configure the build
+mkdir build && cd build
+cmake ..
+
+# Compile the libnetconf2 code
+make
+
+# Install libnetconf2
+sudo make install
+
+# Verify installation by checking version
+pkg-config --modversion libnetconf2
+7. Install gRPC
+gRPC is a framework used for remote procedure calls (RPCs). It's required for gnmi to send notifications and perform actions via gRPC.
+
+bash
+Copy
+# Install Golang (required for gRPC)
+sudo apt-get install golang-go
+
+# Clone the gRPC repository from GitHub
+git clone https://github.com/grpc/grpc.git
+
+# Navigate into the gRPC directory
+cd grpc
+
+# Initialize submodules (required by gRPC)
+git submodule update --init
+
+# Build gRPC
+make
+
+# Install gRPC
+sudo make install
+
+# Verify gRPC installation
+grpc_cpp_plugin --version
+8. Install gnmi
+gnmi is a network management protocol that uses gRPC for managing network devices. Follow these steps to install gnmi:
+
+bash
+Copy
+# Clone the gnmi repository from GitHub
+git clone https://github.com/openconfig/gnmi.git
+
+# Navigate into the gnmi directory
+cd gnmi
+
+# Install gnmi using Go
+go install ./cmd/gnmi
+
+# Verify gnmi installation
+gnmi -h
+9. Example of Using sysrepo with Netopeer2 and libnetconf2
+After installation, you can interact with sysrepo, Netopeer2, and libnetconf2 for device management. Here's an example of how to use sysrepocfg for interacting with the configuration datastore.
+
+Import a Configuration:
+
+bash
+Copy
+# Import a configuration file (e.g., running.xml) to sysrepo
+sysrepocfg --import=~/Documents/data/running.xml
+Export a Configuration:
+
+bash
+Copy
+# Export a configuration from the operational datastore
+sysrepocfg --export --datastore operational --module ietf-interfaces
+Edit Configuration Using sysrepocfg:
+
+bash
+Copy
+# Open the running configuration in an editor (e.g., vim) and lock the datastore
+sysrepocfg --edit=vim --lock
+Send a Notification:
+
+bash
+Copy
+# Send a notification using sysrepocfg
+sysrepocfg --notification=notif.xml
+10. Using gRPC and gnmi for Notifications
+Once gnmi is installed, you can set up a simple gRPC server to send notifications.
+
+go
+Copy
+package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+    "google.golang.org/grpc"
+    "github.com/openconfig/gnmi/proto/gnmi"
+    "net"
+)
+
+type gnmiServer struct {
+    gnmi.UnimplementedGNMIServer
+}
+
+// Subscribe method to send notifications
+func (s *gnmiServer) Subscribe(req *gnmi.SubscribeRequest, stream gnmi.GNMI_SubscribeServer) error {
+    notif := &gnmi.Notification{
+        Timestamp: 1234567890,
+        Update: []*gnmi.Update{
+            {
+                Path: &gnmi.Path{
+                    Elem: []*gnmi.PathElem{
+                        {Name: "interfaces", Key: map[string]string{"name": "eth0"}},
+                    },
+                },
+                Val: &gnmi.TypedValue{
+                    Value: &gnmi.TypedValue_StringVal{
+                        StringVal: "interface up",
+                    },
+                },
+            },
+        },
+    }
+    if err := stream.Send(notif); err != nil {
+        return err
+    }
+    return nil
+}
+
+func main() {
+    // Listen on port 50051 for gRPC
+    lis, err := net.Listen("tcp", ":50051")
+    if err != nil {
+        log.Fatalf("failed to listen: %v", err)
+    }
+    grpcServer := grpc.NewServer()
+    gnmi.RegisterGNMIServer(grpcServer, &gnmiServer{})
+
+    fmt.Println("Starting gRPC server on port 50051...")
+    if err := grpcServer.Serve(lis); err != nil {
+        log.Fatalf("failed to serve: %v", err)
+    }
+}
+Run the gRPC Server:
+bash
+Copy
+go run gnmi-server.go
+This Go code sets up a gRPC server that listens on port 50051 and sends notifications using the gnmi protocol.
+
+Conclusion
+With the above steps, you now have a complete NETCONF, sysrepo, libnetconf2, Netopeer2, gRPC, and gnmi setup on your Ubuntu system.
+
+sysrepo for storing YANG-based configuration data.
+libnetconf2 and Netopeer2 for handling NETCONF operations.
+gnmi for using gRPC to send and receive notifications.
+Let me know if you need further details on any specific part of the setup!
+
+
+
