@@ -1,0 +1,1465 @@
+import csv
+import time
+import os
+import sys
+import re
+import io
+import subprocess
+import pandas as pd
+from datetime import datetime
+import pyautogui
+import pyperclip
+from reportlab.platypus import SimpleDocTemplate, Image, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.pagesizes import A4
+import json
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.common.action_chains import ActionChains
+from selenium.webdriver.support.ui import WebDriverWait, Select
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, StaleElementReferenceException
+from pathlib import Path
+from tejas_utils import *
+from common_libs.logger import logger
+from ne_level_adrs_deletion import NeLevelDeletion
+
+BASE_DIR = Path(__file__).parent
+SS_DIR = Path(__file__).parent / "screenshots"
+EXPORT_DIR = Path(__file__).parent / "exports"
+ASSETS_DIR = Path(__file__).parent / "assets" / "non_live_circuit_deletion" 
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+class NonLiveCircuitDeletion:
+
+    def __init__(self, driver, db_query, diag_username, diag_passwords, filepath):
+        logger.info("#### NonLiveCircuitDeletion initialized successfully ###########")
+        self.driver = driver
+        self.db_query = db_query
+        self.diag_username = diag_username
+        self.diag_passwords = diag_passwords
+        self.processed_vcgs = set()
+        self.login_manager = None
+        self.filepath = filepath
+        self.elements = []
+        self.styles = getSampleStyleSheet()
+        self.current_pdf = str(ASSETS_DIR / f"screenshots_{timestamp}.pdf")
+
+    def home_page(self):
+        wait = WebDriverWait(self.driver, 10)
+        configuration = wait.until(EC.visibility_of_element_located((By.XPATH, "//span[text()='Configuration']")))
+        act = ActionChains(self.driver)
+        act.move_to_element(configuration).perform()
+        circuits = wait.until(EC.visibility_of_element_located((By.XPATH, "//span[text()='Circuits']")))
+        act.move_to_element(circuits).perform()
+        manage = wait.until(EC.element_to_be_clickable((By.XPATH, "//a[text()='Manage Circuits']")))
+        act.key_down(Keys.CONTROL).click(manage).key_up(Keys.CONTROL).perform()
+        tabs = self.driver.window_handles
+        self.driver.switch_to.window(tabs[-1])
+        time.sleep(0.2)
+
+    def collect_packet_flow(self, port_number):
+        logger.info("collect packet flow started")
+        time.sleep(1)
+        wait = WebDriverWait(self.driver, 10)
+        logger.info(f"checking packet flow status")
+        self.driver.switch_to.default_content()
+        WebDriverWait(self.driver, 20).until(EC.frame_to_be_available_and_switch_to_it((By.NAME, "nodeTocFrame")))
+        time.sleep(1)
+        performance_btn = wait.until(EC.element_to_be_clickable(
+            (By.XPATH, "//a[contains(@id,'itemText') and contains(normalize-space(.),'Performance')]")))
+        performance_btn.click()
+        time.sleep(1)
+        cur_inter_btn = wait.until(EC.element_to_be_clickable(
+            (By.XPATH, "//a[contains(@id,'itemText') and contains(normalize-space(.),'Current interval')]")))
+        cur_inter_btn.click()
+        time.sleep(1)
+        # -------- CLICK VCG --------
+        vcg_btn = wait.until(EC.element_to_be_clickable(
+            (By.XPATH, "//a[contains(@id,'itemText') and contains(normalize-space(.),'VCG')]")))
+        vcg_btn.click()
+        time.sleep(1)
+        self.driver.switch_to.default_content()
+        WebDriverWait(self.driver, 20).until(
+            EC.frame_to_be_available_and_switch_to_it((By.NAME, "nodeBodyFrame"))
+        )
+        port_ptn = f"//a[contains(@href,'Interface') and b[contains(normalize-space(),'{port_number}')]]"
+        port_ptn = wait.until(EC.element_to_be_clickable((By.XPATH, port_ptn)))
+        port_ptn.click()
+
+        logger.info(f"clicked on respective port successfully")
+
+        metrics = [
+            "Valid Frames Transmitted",
+            "Valid Frames Received",
+            "Valid Bytes Transmitted",
+            "Valid Bytes Received"
+        ]
+
+        for attempt in range(3):
+            try:
+                self.driver.switch_to.default_content()
+                WebDriverWait(self.driver, 20).until(
+                    EC.frame_to_be_available_and_switch_to_it((By.NAME, "nodeBodyFrame"))
+                )
+                table_xpath = f"//table[caption/b[contains(normalize-space(),'{port_number}')]]"
+                table = wait.until(
+                    EC.presence_of_element_located((By.XPATH, table_xpath))
+                )
+                values_list = []
+                logger.info(f"Capturing packet flow status for port {port_number}")
+                for metric in metrics:
+                    row = table.find_element(By.XPATH, f".//tr[td/b[normalize-space()='{metric}']]")
+                    columns = row.find_elements(By.TAG_NAME, "td")
+                    values_list.extend([col.text.strip() for col in columns[1:5]])
+
+                logger.info(f"packet_flow for {port_number}: {values_list}")
+
+                flow = sum(int(x) for x in values_list)
+                if flow != 0:
+                    return "available"
+                else:
+                    return "unavailable"
+            except StaleElementReferenceException:
+                time.sleep(1)
+                continue
+        return "Unknown"
+
+    def switch_to_frames(self, driver, *frames, timeout=60):
+        driver.switch_to.default_content()
+        for frame in frames:
+            WebDriverWait(driver, timeout).until(
+                EC.frame_to_be_available_and_switch_to_it((By.NAME, frame)))
+
+    def open_shelf_port(self, port_number):
+        wait = WebDriverWait(self.driver, 20)
+        try:
+            pattern = r'^(E1|VCG|ETH|STM1|STM4|STM16|STM64)-([1-9]|[1-5][0-9]|6[0-4])-([1-9]|[1-9][0-9]|1[0-9]{2}|200)-([1-9]|[1-9][0-9]|[1-9][0-9]{2}|500)$'
+            match = re.match(pattern, port_number)
+            if not match:
+                raise Exception(f"Invalid port format: {port_number}")
+            port = match.group(3)
+            # port = port_number.split(" - ")[2]
+            logger.info(f"regex result port number is: {port}")
+            logger.info(f"clicking on slot(Shelf)")
+            self.driver.switch_to.default_content()
+            frame_element = WebDriverWait(self.driver, 30).until(
+                EC.visibility_of_element_located((By.NAME, "nodeTocFrame")))
+            self.driver.switch_to.frame(frame_element)
+            inventory_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//a[normalize-space()='Inventory']")))
+            inventory_btn.click()
+            logger.info("clicked on inventory btn successfully")
+
+            # click on Shelf btn
+            shelf_btn = wait.until(
+                EC.element_to_be_clickable((By.XPATH, "//a[starts-with(normalize-space(), 'SHELF-')]")))
+            shelf_btn.click()
+            logger.info("clicked on shelf btn successfully")
+
+            # click on respective port
+            port_ele = f"//a[contains(@href,'Slot={port}') and contains(@id,'itemTextLink')]"
+            port_btn = wait.until(EC.element_to_be_clickable((By.XPATH, port_ele)))
+            port_btn.click()
+            logger.info(f"clicked on port {port_btn.text} successfully")
+
+            # click on Ports
+            # Manage frames to enter "nodeBodyFrame --> ticTopFrame"
+            self.driver.switch_to.default_content()
+            self.switch_to_frames(self.driver, "nodeBodyFrame", "ticTopFrame")
+            # Click Ports btn
+            logger.info("clicking on ports")
+            port_ele = f"//a[contains(@href,'CardPorts') and contains(@href,'Slot={port}')]"
+            port_btn = wait.until(EC.element_to_be_clickable((By.XPATH, port_ele)))
+            port_btn.click()
+            logger.info(f"clicked on ports successfully")
+
+            # identify that "Ports" table loaded
+            table = wait.until(EC.presence_of_element_located(
+                (By.XPATH, "//table[caption/b[normalize-space()='Ports']]")))
+            if table:
+                logger.info(f"port status table found successfully")
+            else:
+                logger.warning("port status table not found")
+
+            return True
+        except Exception as e:
+            logger.error(f"Select port failed due to {e}")
+            return False
+
+    def convert_port(self, full_port, port_new):
+        parts = full_port.split("-")
+        if len(parts) == 4:
+            parts[2] = port_new
+            return "-".join(parts)
+        else:
+            raise ValueError("Port string format is invalid")
+
+    def nms_level_deletion(self, row, index):
+        time.sleep(5)
+        try:
+            WebDriverWait(self.driver, 10).until(EC.visibility_of_element_located((By.ID, "userLabel")))
+        except:
+            self.home_page()
+            WebDriverWait(self.driver, 10).until(EC.visibility_of_element_located((By.ID, "userLabel")))
+
+        circuit_id = str(row.get("connection_id", "")).strip().rstrip("_")
+        tjs_id = str(row.get("tjs_id", "")).strip() if row.get("tjs_id") else ""
+        service_name = str(row.get("service_name", "")).strip()
+        if not tjs_id or tjs_id.lower() in ["", "none", "nan"]:
+            logger.info(f"[SKIP NMS] tjs_id NULL -> Direct ADRS")
+            return{"status":"ADRS","service_name":service_name,"zone":row.get("zone"),"connection_id":circuit_id}
+
+        self.current_connection_id = circuit_id
+        a_node = str(row.get("a_end", "")).strip().upper()
+        b_node = str(row.get("b_end", "")).strip().upper()
+        is_unknown_node = "UNKNOWN" in [a_node, b_node]
+        if is_unknown_node:
+            logger.info(f"UNKNOWN node detected(A={a_node}, B={b_node}) - direct deletion")
+            WebDriverWait(self.driver, 5).until(EC.visibility_of_element_located((By.ID, "userLabel")))
+        else:
+            node, port = self.get_vcg_node_and_port(row)
+            is_duplicate_vcg = False
+            if node and port:
+                vcg = port.strip().upper()
+                if vcg in self.processed_vcgs:
+                    logger.info(f"skipping duplicates VCG {vcg}, but performing deletion operation in manage circuits")
+                    is_duplicate_vcg = True
+                else:
+                    self.processed_vcgs.add(vcg)
+            if node and port and not is_duplicate_vcg:
+                logger.info(f"VCG/E1 found -> Node: {node}, Port: {port}")
+                time.sleep(1)
+
+                flow_status = self.check_traffic_flow(node, port)
+                logger.info(f"Flow: {flow_status}")
+                if flow_status == "failed":
+                    logger.error(f"Node {node} failed")
+                    return
+                if flow_status != "unavailable":
+                    logger.info("Skipping deletion (LIVE traffic)")
+                    self.db_query.update_deletion_status(connection_id=circuit_id, status=False,
+                                                         remarks="Circuit is Active - deletion skipped")
+                    self.devices_df.at[index, 'status'] = 'SKIPPED'
+                    self.devices_df.at[index, 'remarks'] = "Circuit is Active"
+                    return
+            else:
+                logger.info("No VCG -> normal deletion")
+
+        SPECIAL_CIRCUITS = ["TEJAS"]
+        is_tejas = False
+
+        if circuit_id and any(circuit_id.strip().upper().startswith(x) for x in SPECIAL_CIRCUITS):
+            time.sleep(1)
+            id_input =  WebDriverWait(self.driver, 5).until(
+                EC.visibility_of_element_located((By.XPATH, "//input[@name='cktId']")))
+            id_input.clear()
+            time.sleep(1)
+            self.search_tejas_network(row)
+            is_tejas = True
+
+        logger.info(f"Circuit {circuit_id}")
+
+        try:
+            if not is_tejas:
+                try:
+                    node_field = self.driver.find_element(By.XPATH, "(//input[@class='dhx_combo_input'])[1]")
+                    node_field.send_keys(Keys.CONTROL + "a")
+                    node_field.send_keys(Keys.DELETE)
+                except:
+                    pass
+                try:
+                    timeslot_field = self.driver.find_element(By.XPATH, "//*[@id='timeslot']")
+                    timeslot_field.send_keys(Keys.CONTROL + "a")
+                    timeslot_field.send_keys(Keys.DELETE)
+                except:
+                    pass
+                try:
+                    self.driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
+                except:
+                    pass
+                try:
+                    id_input = WebDriverWait(self.driver, 5).until(EC.visibility_of_element_located((By.ID, "cktid")))
+                    id_input.clear()
+                except:
+                    pass
+                try:
+                    circuit_label_input = WebDriverWait(self.driver, 5).until(EC.visibility_of_element_located((By.ID, "userLabel")))
+                    circuit_label_input.clear()
+                except:
+                    pass
+                time.sleep(1)
+                id_input =  WebDriverWait(self.driver, 5).until(EC.visibility_of_element_located((By.XPATH, "//input[@name='cktId']")))
+                id_input.click()
+                time.sleep(1)
+                id_input.clear()
+                if tjs_id and tjs_id.lower() not in ["none", "nan"]:
+                    id_input.send_keys(tjs_id)
+                logger.info(f"Entered tjs_id in ID field: {tjs_id}")
+
+                WebDriverWait(self.driver, 10).until(EC.element_to_be_clickable(
+                        (By.XPATH, "(//img[@title='Search' and contains(@src,'search_image')])[1]"))).click()
+
+            WebDriverWait(self.driver, 5).until(
+                EC.presence_of_element_located((By.XPATH, "//div[contains(@class,'objbox')]//tr"))
+            )
+            if is_unknown_node:
+                self.take_screenshot(f"Unknown circuit-{label}")
+
+            try:
+                time.sleep(1)
+                ok_btn = WebDriverWait(self.driver, 5).until(
+                    EC.presence_of_element_located((By.XPATH, '//*[@id="dialog_butt_ok"]'))
+                )
+                ok_btn.click()
+                time.sleep(1)
+                self.db_query.update_deletion_status(
+                    connection_id=str(circuit_id).strip(),
+                    status=False,
+                    remarks="Circuit not found in Tejas Manage Circuits"
+                )
+                self.devices_df.at[index, 'status'] = 'FAILED'
+                self.devices_df.at[index, 'remarks'] = "Circuit not found in Tejas Manage circuits"
+                return
+
+            except TimeoutException:
+                logger.info(f"Clicked Search for circuit_id: {circuit_id}")
+
+                rows = WebDriverWait(self.driver, 5).until(EC.presence_of_all_elements_located((By.XPATH, "//div[contains(@class,'objbox')]//tr")))
+
+                logger.info(f"Found {len(rows)} rows for circuit {circuit_id}")
+                allowed_states = ["PENDING", "PARTIAL", "ORPHAN", "CONFLICT"]
+                delete_flag = True
+                valid_rows = []
+                for r in rows:
+                    cells = r.find_elements(By.TAG_NAME, "td")
+                    if len(cells) < 7:
+                        continue
+
+                    label = cells[2].text.strip()
+                    state = cells[6].text.strip().upper()
+
+                    logger.info(f"Row label: {label}, State: {state}")
+                    if state in ["PENDING", "PARTIAL", "ORPHAN", "CONFLICT"]:
+                        logger.info(f"Special state detected:{state}")
+                        self.take_screenshot(f"Direct state-{label}")
+
+                    # if is_tejas:
+                    #     if circuit_id not in label:
+                    #         continue
+                    # else:
+                    #     if label != circuit_id:
+                    #         continue
+
+                    if state not in allowed_states:
+                        delete_flag = False
+                        logger.info(f"State {state} not eligible for deletion")
+                        continue
+
+                    valid_rows.append(r)
+
+                if not delete_flag:
+                    # logger.info(f"Circuit {circuit_id} not found in Manage Circuits")
+                    self.db_query.update_deletion_status(
+                        connection_id=circuit_id,
+                        status=False,
+                        remarks="State not eligible"
+                    )
+                    self.devices_df.at[index, 'status'] = 'FAILED'
+                    self.devices_df.at[index, 'remarks'] = "State not eligible"
+                    return
+
+                if delete_flag and valid_rows:
+                    logger.info("All circuits eligible. Selecting rows")
+
+                    for r in valid_rows[1:]:
+                        select_cell = r.find_elements(By.TAG_NAME, "td")[1]
+
+                        self.driver.execute_script("""
+                            var evt = new MouseEvent('click', {
+                                bubbles: true,
+                                ctrlKey: true
+                            });
+                            arguments[0].dispatchEvent(evt);
+                        """, select_cell)
+                    time.sleep(1)
+                    first_cell = valid_rows[0].find_elements(By.TAG_NAME, "td")[1]
+                    self.driver.execute_script(
+                        "arguments[0].scrollIntoView({block:'center'});",
+                        first_cell
+                    )
+                    time.sleep(1)
+                    ActionChains(self.driver).context_click(first_cell).perform()
+                    delete_btn = WebDriverWait(self.driver, 5).until(
+                        EC.element_to_be_clickable(
+                            (By.XPATH, "//div[normalize-space()='Delete']")
+                        )
+                    )
+                    delete_btn.click()
+
+                    delete_deactivate_btn = WebDriverWait(self.driver, 10).until(
+                        EC.element_to_be_clickable(
+                            (By.XPATH, "(//div[normalize-space()='Delete And Deactivate'])[1]")
+                        )
+                    )
+
+                    self.driver.execute_script("arguments[0].click();", delete_deactivate_btn)
+                    time.sleep(2)
+                    WebDriverWait(self.driver, 10).until(EC.alert_is_present())
+                    alert = self.driver.switch_to.alert
+                    print(alert.text)
+                    alert.dismiss()
+                    # alert.accept()
+                    # close_btn = WebDriverWait(self.driver, 10).until(EC.element_to_be_clickable((By.XPATH, "//input[@id='ajaxResponseWindow_close_']")))
+                    # close_btn.click()
+                    time.sleep(1)
+                    logger.info(f"Deletion triggered for circuit {circuit_id}")
+                    self.db_query.update_deletion_status(
+                        connection_id=circuit_id.strip(),
+                        status=True,
+                        remarks="Deleted in NMS Level"
+                    )
+                    self.devices_df.at[index, 'status'] = 'SUCCESS'
+                    self.devices_df.at[index, 'remarks'] = "Deleted in NMS Level"
+                    return "DONE"
+                else:
+                    logger.info(f"Circuit {circuit_id} skipped due to state mismatch")
+                    return "DONE"
+
+        except Exception as e:
+            logger.warning(f"Failed for circuit_id {circuit_id}: {e}")
+            self.db_query.update_deletion_status(
+                connection_id=circuit_id.strip(),
+                status=False,
+                remarks=str(e)
+            )
+            self.devices_df.at[index, 'status'] = 'FAILED'
+            self.devices_df.at[index, 'remarks'] = str(e)
+            return "DONE"
+        
+    def take_screenshot(self, title="Screenshot"):
+        try:
+            screenshot_bytes = self.driver.get_screenshot_as_png()
+            img_stream = io.BytesIO(screenshot_bytes)
+            img = Image(img_stream)
+            img.drawWidth = 500
+            img.drawHeight = img.drawWidth * img.imageHeight / img.imageWidth
+            content = [
+                Paragraph(title, self.styles["Heading3"]),
+                Spacer(1, 10),
+                img,
+                Spacer(1, 20)
+            ]
+            self.elements.extend(content)
+            logger.info("Screenshot added to PDF")
+        except Exception as e:
+            logger.warning(f"Screenshot failed: {e}")
+        
+    def finalize_pdf(self):
+        try:
+            if not self.elements:
+                return
+            doc = SimpleDocTemplate(self.current_pdf, pagesize=A4)
+            doc.build(self.elements)
+            logger.info(f"PDF saved: {self.current_pdf}")
+        except Exception as e:
+            logger.exception(f"PDF build failed: {e}")
+
+    def ne_level_deletion(self, node, card=None, port=None, stm=None, jklm=None, circuit_type="OPTICAL", mode="delete", connection_id="None", full_port=None, is_priority=False):
+
+        wait = WebDriverWait(self.driver, 10)
+        time.sleep(0.2)
+        node_input = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[@class='dhx_combo_input']")))
+        node_input.click()
+        time.sleep(0.2)
+        # character_typing(node_input, node)
+        # node_input.send_keys(Keys.ENTER)
+        # node_input.click()
+        # time.sleep(0.2)
+        node_input.send_keys(Keys.CONTROL + "a")
+        node_input.send_keys(Keys.BACKSPACE)
+        time.sleep(0.2)
+        node_input.send_keys(node)
+        time.sleep(0.3)
+        node_input.send_keys(Keys.ENTER)
+        logger.info(f"Node entered: {node}")
+        time.sleep(1)
+        search_node = WebDriverWait(self.driver, 5).until(EC.element_to_be_clickable(
+            (By.XPATH, "(//img[@title='Search Nodes'])[1]")))
+        search_node.click()
+        time.sleep(1)
+        try:
+            WebDriverWait(self.driver, 5).until(EC.visibility_of_element_located((By.ID, "dialog_butt_ok")))
+            self.driver.find_element(By.ID, "dialog_butt_ok").click()
+            logger.info("Popup handled -> No results")
+            return "not found"
+        except:
+            logger.info("No popup appeared")
+        parent_window = self.driver.current_window_handle
+        ip_element = wait.until(EC.element_to_be_clickable(
+        (By.XPATH, "//*[@id='gridbox']/table/tbody/tr[2]/td/div/div/table/tbody/tr[2]/td[1]/a")))
+        node_ip = ip_element.text.strip()
+        self.global_node_ip = node_ip
+        logger.info(f"Global Node IP: {node_ip}")
+        ip_element.click()
+        wait.until(lambda d: len(d.window_handles) > 1)
+        self.driver.switch_to.window(self.driver.window_handles[-1])
+        try:
+            WebDriverWait(self.driver, 10).until(EC.alert_is_present())
+            alert = self.driver.switch_to.alert
+            alert.accept()
+            logger.info("Alert accepted")
+        except:
+            logger.info("No alert present")
+        time.sleep(0.2)
+        # try:
+        #     time.sleep(5)
+        #     # WebDriverWait(self.driver, 20).until(EC.visibility_of_element_located((By.NAME, "Username")))
+        #     WebDriverWait(self.driver, 20).until(lambda d:
+        #                                          d.find_elements(By.NAME, "Username") or 
+        #                                          d.find_elements(By.ID, "Uptime"))
+        #     if self.driver.find_elements(By.NAME, "Username"):
+        #         logger.info("Login page loaded normally")
+        #     elif self.driver.find_elements(By.ID, "Uptime"):
+        #         logger.inf("Node page already loaded (uptime detecetd)")
+        # except:
+        #     logger.warning("Username not found -> using open node ne fallback")
+        #     status = self.open_node_ne(self.global_node_ip, parent_window, node)
+        #     if status == "failed":
+        #         logger.error(f"Skipping node:{node}")
+        #         return "failed"
+        
+        self.handle_unexpected_alert()
+        ensure_write_mode(self.driver, self.diag_username, self.diag_passwords)
+        logger.info("Login handeled via ensure_write_mode")
+        logger.info(f"MODE VALUE: {mode}")
+        if mode == "flow_check":
+            return "success"
+        self.driver.switch_to.window(self.driver.window_handles[-1])
+        self.driver.switch_to.default_content()
+        time.sleep(1)
+        self.tejas_node_manager()
+        result = self.apply_cross_connect_filter(node,
+            card,
+            port,
+            stm if circuit_type == "OPTICAL" else None,
+            jklm if circuit_type == "OPTICAL" else None,
+            connection_id,
+            full_port,
+            is_priority=is_priority
+        )
+        if result == "LIVE":
+            return "LIVE"
+        self.driver.close()
+        self.driver.switch_to.window(parent_window)
+        self.driver.switch_to.default_content()
+        WebDriverWait(self.driver, 5).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+        time.sleep(1)
+        return "success"
+    
+    def open_node_ne(self, node_ip, parent_window, node):
+
+        def is_error_page():
+            try:
+                page = self.driver.page_source.lower()
+                return "no route to host" in page or "requested url could not be retrieved" in page
+            except:
+                return True
+
+        def safe_close_tab():
+            try:
+                handles = self.driver.window_handles
+                if len(handles) > 1:
+                    self.driver.switch_to.window(handles[-1])
+
+                    try:
+                        self.driver.execute_script("window.stop();")
+                    except:
+                        pass
+
+                    self.driver.close()
+                    self.driver.switch_to.window(parent_window)
+            except:
+                pass
+
+        try:
+            logger.info("Opening node via click")
+
+            WebDriverWait(self.driver, 5).until(lambda d: len(d.window_handles) > 1)
+            self.driver.switch_to.window(self.driver.window_handles[-1])
+
+            time.sleep(15)
+
+            if is_error_page():
+                raise Exception("Error page after click")
+
+            try:
+                ensure_write_mode()
+            except:
+                pass
+
+            frame_element = WebDriverWait(self.driver, 10).until(
+                EC.visibility_of_element_located((By.NAME, "commonHeader"))
+            )
+            self.driver.switch_to.frame(frame_element)
+
+            WebDriverWait(self.driver, 5).until(
+                EC.visibility_of_element_located((By.XPATH, "//b[contains(text(),'Uptime')]"))
+            )
+
+            self.driver.switch_to.default_content()
+
+            logger.info("Node opened successfully via click")
+            return "success"
+
+        except Exception:
+            try:
+                logger.info("Click failed → trying URL")
+
+                safe_close_tab()
+
+                self.driver.execute_script("window.open('');")
+                self.driver.switch_to.window(self.driver.window_handles[-1])
+                self.driver.set_page_load_timeout(15)
+
+                try:
+                    self.driver.get(f"http://{node_ip}:20080")
+                except:
+                    try:
+                        self.driver.execute_script("window.stop();")
+                    except:
+                        pass
+
+                time.sleep(15)
+
+                if is_error_page():
+                    raise Exception("Error page after URL")
+
+                try:
+                    ensure_write_mode()
+                except:
+                    pass
+
+                frame_element = WebDriverWait(self.driver, 10).until(
+                    EC.visibility_of_element_located((By.NAME, "commonHeader"))
+                )
+                self.driver.switch_to.frame(frame_element)
+
+                WebDriverWait(self.driver, 5).until(
+                    EC.visibility_of_element_located((By.XPATH, "//b[contains(text(),'Uptime')]"))
+                )
+
+                self.driver.switch_to.default_content()
+
+                logger.info("Node opened successfully via URL")
+                return "success"
+
+            except Exception:
+                logger.error(f"Node {node} failed to open completely")
+
+                safe_close_tab()
+                return "failed"
+
+    def handle_unexpected_alert(self):
+        try:
+            WebDriverWait(self.driver, 3).until(EC.alert_is_present())
+            alert = self.driver.switch_to.alert
+            text = alert.text
+            logger.warning(f"Unexpected alert detected: {text}")
+            alert.accept()
+            time.sleep(1)
+            return True
+        except:
+            return False
+
+    def check_traffic_flow(self, node, port):
+        main_tab = self.driver.current_window_handle
+        self.open_manage_nodes()
+        time.sleep(2)
+        WebDriverWait(self.driver, 5).until(EC.presence_of_element_located((By.XPATH, "//input[@class='dhx_combo_input']")))
+        manage_nodes_tab = self.driver.current_window_handle
+        open_status = self.ne_level_deletion(node=node, mode="flow_check")
+        if open_status == "failed":
+            logger.error(f"node failed")
+            return "failed"
+        
+        WebDriverWait(self.driver, 10).until(lambda d: len(d.window_handles) > 1)
+        node_tab = self.driver.window_handles[-1]
+        self.driver.switch_to.window(node_tab)
+        try:
+            if "E1" in port:
+                logger.info(f"E1 detected for port: {port}")
+                self.open_shelf_port(port)
+                time.sleep(2)
+                self.take_screenshot(f"E1 - {node} - {port}")
+                status = self.admin_oper_alarm(port)
+                oper = str(status.get("operational", "")).lower()
+                cir = str(status.get("cir_status", "")).lower()
+                logger.info(f"DEBUG -> cir_status: {cir}, operational:{oper}")
+                if "non" in cir or "live" in cir:
+                    return "unavailable"
+                elif "down" in oper:
+                    return "unavailable"
+                else:
+                    return "available"
+            # ---------------- VCG FLOW ----------------
+            vcg_flow = self.collect_packet_flow(port)
+            self.take_screenshot(f"VCG_PACKET_FLOW - {node} - {port}")
+            logger.info(f"VCG Flow: {vcg_flow}")
+            self.open_shelf_port(port)
+            time.sleep(2)
+            self.take_screenshot(f"VCG - {node} - {port}")
+            self.switch_to_frames(self.driver, "nodeTocFrame")
+            l2_elements = self.driver.find_elements(By.XPATH, "//a[contains(text(), 'L2 Services')]")
+            # l2_elements = WebDriverWait(self.driver, 20).until(
+            #     EC.presence_of_all_elements_located((By.XPATH, "//a[contains(text(), 'L2 Services')]")))
+            if l2_elements:
+                eth_status = self.l2_eth_card(port, node, vcg_flow)
+            else:
+                eth_status = self.l1_eth_card(port, vcg_flow)
+            logger.info(f"ETH status: {eth_status}")
+            packet_flow = eth_status.get("packet_flow")
+            cir_status = eth_status.get("cir_status")
+            logger.info(
+                f"VCG: {vcg_flow}, ETH: {packet_flow}, STATUS: {cir_status}"
+            )
+            if (
+                    vcg_flow in ["unavailable", "NA"] and
+                    packet_flow in ["unavailable", "NA"] and
+                    cir_status == "non-live"
+            ):
+                logger.info("SAFE TO DELETE")
+                return "unavailable"
+            else:
+                logger.info("SKIP DELETE")
+                return "available"
+
+            # logger.info("TEST MODE: Forcing deletion")
+            # return "unavailable"
+
+        finally:
+            self.driver.close()
+            self.driver.switch_to.window(manage_nodes_tab)
+            self.driver.close()
+            self.driver.switch_to.window(main_tab)
+
+    def get_vcg_node_and_port(self, row):
+        a_node = str(row.get("a_end", "")).strip()
+        b_node = str(row.get("b_end", "")).strip()
+        a_port = str(row.get("a_end_port", "")).upper()
+        b_port = str(row.get("b_end_port", "")).upper()
+        
+        # if any(x in a_port for x in ["VCG", "E1"]):
+        #     return row.get("a_end"), a_port
+        # if any(x in b_port for x in ["VCG", "E1"]):
+        #     return row.get("b_end"), b_port
+        if "E1" in a_port:
+            return row.get("a_end"), a_port
+        if "E1" in b_port:
+            return row.get("b_end"), b_port
+        if "VCG" in a_port:
+            return row.get("a_end"), a_port
+        if "VCG" in b_port:
+            return row.get("b_end"), b_port
+        return None, None
+
+    def search_tejas_network(self, row):
+        circuit_id = str(row.get("connection_id", "")).strip()
+        a_node = str(row.get("a_end", "")).strip()
+        b_node = str(row.get("b_end", "")).strip()
+        a_port_value = str(row.get("a_end_port", "")).strip()
+        b_port_value = str(row.get("b_end_port", "")).strip()
+        if "E1" in a_port_value or "VCG" in a_port_value:
+            node = a_node
+            port_value = a_port_value
+        elif "E1" in b_port_value or "VCG" in b_port_value:
+            node = b_node
+            port_value = b_port_value
+        else:
+            if a_port_value:
+                node = a_node
+                port_value = a_port_value
+            else:
+                node = a_node
+                port_value = a_port_value
+
+
+        # port_value = port_value.upper()
+        parts = port_value.split("-")
+
+        port = "-".join(parts[:4])
+        # timeslot = "-".join(parts[4:])
+        if port_value.startswith("STM") and len(parts) > 4:
+            timeslot = "-".join(parts[4:])
+        else:
+            timeslot = None
+
+        logger.info(f"Tejas search -> Node:{node}, Port:{port}, TimeSlot:{timeslot}")
+        time.sleep(3)
+        wait = WebDriverWait(self.driver, 5)
+        node_input = wait.until(
+            EC.element_to_be_clickable((By.XPATH, "(//input[@class='dhx_combo_input'])[1]"))
+        )
+        # # character_typing(node_input, node)
+        node_input.send_keys(node)
+        time.sleep(2)
+        node_input.send_keys(Keys.ENTER)
+        # print(f"Node entered: {node}")
+        time.sleep(2)
+
+        port_input = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[@id='tpBrowser']")))
+        port_input.click()
+        time.sleep(1)
+
+        search_box = WebDriverWait(self.driver, 5).until(
+            EC.visibility_of_element_located((By.XPATH, "//div[contains(text(),'TejNms')]/following::input[1]"))
+        )
+        # character_typing(search_box, port)
+        search_box.send_keys(port)
+        time.sleep(0.5)
+        search_box.send_keys(Keys.ENTER)
+        # print(f"STM entered: {port}")
+        time.sleep(1)
+        port = port.strip()
+        # print("port from DB: ", port)
+        stm_element = WebDriverWait(self.driver, 20).until(
+            EC.element_to_be_clickable((By.XPATH, f"//div[@class='objbox']//span[text()='{port}']")))
+        self.driver.execute_script("arguments[0].click();", stm_element)
+        # print(f"STM clicked: {stm_element}")
+
+        ok_btn = WebDriverWait(self.driver, 10).until(EC.element_to_be_clickable((By.XPATH, "//*[@id='win_ok']")))
+        ok_btn.click()
+        time.sleep(2)
+        if timeslot:
+            timeslot_input = WebDriverWait(self.driver, 10).until(
+                EC.visibility_of_element_located((By.XPATH, "//*[@id='timeslot']")))
+            # character_typing(timeslot_input, timeslot)
+            timeslot_input.send_keys(timeslot)
+            time.sleep(0.5)
+            timeslot_input.send_keys(Keys.ENTER)
+        else:
+            logger.info(f"Skipping timeslot input(E1/VCG")
+        time.sleep(1)
+        search_button = WebDriverWait(self.driver, 10).until(
+            EC.element_to_be_clickable((By.XPATH, "(//img[@title='Search'])[1]")))
+        search_button.click()
+        time.sleep(2)
+
+    def open_manage_nodes(self):
+        self.driver.switch_to.default_content()
+        wait = WebDriverWait(self.driver, 10)
+        act = ActionChains(self.driver)
+        topology = wait.until(EC.visibility_of_element_located((By.XPATH, "(//span[contains(text(), 'Topology')])[1]")))
+        act.move_to_element(topology).perform()
+        manage_nodes = wait.until(EC.element_to_be_clickable((By.XPATH, "//a[contains(text(), 'Manage Nodes')]")))
+        act.key_down(Keys.CONTROL).click(manage_nodes).key_up(Keys.CONTROL).perform()
+        self.driver.switch_to.window(self.driver.window_handles[-1])
+        # time.sleep(2)
+
+    def tejas_node_manager(self):
+        print("*********************************")
+        # time.sleep(1)
+        self.driver.switch_to.default_content()
+        try:
+            WebDriverWait(self.driver, 10).until(EC.frame_to_be_available_and_switch_to_it((By.NAME,"commonhandler")))
+        except:
+            self.driver.switch_to.default_content()
+        WebDriverWait(self.driver, 10).until(
+            EC.frame_to_be_available_and_switch_to_it((By.NAME, "nodeTocFrame")))
+        click(self.driver, (By.XPATH, "//a[contains(text(),'Configuration')]"))
+        click(self.driver, (By.XPATH, "//a[contains(text(),'Cross-connect')]"))
+        # time.sleep(1)
+
+    def node_body_frame(self):
+        WebDriverWait(self.driver, 10).until(lambda d: len(d.window_handles) > 1)
+        self.driver.switch_to.window(self.driver.window_handles[-1])
+        self.driver.switch_to.default_content()
+        WebDriverWait(self.driver, 10).until(EC.frame_to_be_available_and_switch_to_it((By.NAME, "nodeBodyFrame")))
+
+    def apply_cross_connect_filter(self, node, card, port, stm, jklm, connection_id, full_port, is_priority=False):
+        time.sleep(3)
+        wait = WebDriverWait(self.driver, 10)
+        self.node_body_frame()
+        card = str(card).strip()
+        if not card or card.lower == "none":
+            logger.info("skipping card selection")
+            return
+        table = wait.until(EC.visibility_of_element_located(
+            (By.XPATH, "//caption[contains(.,'Filter Cross-connects')]/ancestor::table")))
+        card_dropdown = table.find_element(By.XPATH, ".//select[contains(@name,'Card')]")
+        select = Select(card_dropdown)
+        found = False
+        for option in select.options:
+            option_text = option.text.strip()
+            if option_text.replace(" ", "").endswith(card):
+                select.select_by_visible_text(option_text)
+                found = True
+                logger.info(f"selected card: {option.text}")
+                break
+        if not found:
+            raise Exception(f"card not found: {card}")
+        # ------------------PORT---------------------
+        time.sleep(0.2)
+        port = str(int(float(port))).strip()
+        # logger.info(f"CSV port value: {repr(port)}")
+        port_dropdown = table.find_element(By.XPATH, ".//select[contains(@name,'PN')]")
+        select_port = Select(port_dropdown)
+        wait.until(lambda d: len(select_port.options) > 1)
+        found = False
+        for option in select_port.options:
+            option_text = option.text.strip()
+            if option_text == port or port in option_text:
+                select_port.select_by_visible_text(option_text)
+                found = True
+                logger.info(f"selected port: {option.text}")
+                break
+        if not found:
+            raise Exception(f"port not found: {port}")
+        time.sleep(0.2)
+
+        # -------- STMNo, K, L, M SELECTION (XPATH VERSION) --------
+        if not jklm or str(jklm).lower() in ["none", "nan", "<null>"]:
+            logger.info("VCG / No JKLM -> Skipping STM, K, L, M selection")
+
+        else:
+            # -------- SPLIT JKLM --------
+            j, k, l, m = str(jklm).strip().split("-")
+
+            logger.info(f"J value (for STMNo): {j}")
+            logger.info(f"K value: {k}")
+            logger.info(f"L value: {l}")
+            logger.info(f"M value: {m}")
+
+            # -------- STMNo (J) --------
+            stmno_dropdown = table.find_element(By.XPATH, ".//select[contains(@name,'STM')]")
+            select_stmno = Select(stmno_dropdown)
+
+            wait.until(lambda d: len(select_stmno.options) > 1)
+
+            found = False
+            for option in select_stmno.options:
+                option_text = option.text.strip()
+
+                if option_text == j:
+                    select_stmno.select_by_visible_text(option_text)
+                    # print("selected STMNo:", option_text)
+                    found = True
+                    break
+
+            if not found:
+                raise Exception(f"STMNo not found: {j}")
+
+            time.sleep(0.2)
+
+            # -------- K --------
+            k_dropdown = table.find_element(By.XPATH, ".//select[contains(@name,'SearchK')]")
+            select_k = Select(k_dropdown)
+
+            wait.until(lambda d: len(select_k.options) > 1)
+            select_k.select_by_visible_text(k)
+            time.sleep(0.2)
+
+            # -------- L --------
+            l_dropdown = table.find_element(By.XPATH, ".//select[contains(@name,'SearchL')]")
+            select_l = Select(l_dropdown)
+
+            wait.until(lambda d: len(select_l.options) > 1)
+            select_l.select_by_visible_text(l)
+            time.sleep(0.2)
+
+            # -------- M --------
+            m_dropdown = table.find_element(By.XPATH, ".//select[contains(@name,'SearchM')]")
+            select_m = Select(m_dropdown)
+
+            wait.until(lambda d: len(select_m.options) > 1)
+            select_m.select_by_visible_text(m)
+            time.sleep(0.2)
+
+        # ----------- FILTER BUTTON (COMMON FOR BOTH) -----------
+        filter_button = wait.until(
+            EC.element_to_be_clickable((By.XPATH, "//input[@type='button' and @value='Filter']"))
+        )
+
+        self.driver.execute_script("arguments[0].click();", filter_button)
+        logger.info("Filter button clicked")
+        time.sleep(1)
+        # -----------------select checkbox-----------------
+        try:
+            checkbox = WebDriverWait(self.driver, 5).until(
+                EC.element_to_be_clickable((By.XPATH, "(//table//input[@type='CHECKBOX'])[1]")))
+            self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", checkbox)
+            time.sleep(1)
+            self.driver.execute_script("arguments[0].click();", checkbox)
+            logger.info("Checkbox clicked")
+            self.take_screenshot(f"NE Level Deletion - {node} - {full_port}")
+            time.sleep(1)
+            if is_priority:
+                logger.info(f"LIVE circuit found in AIS injected node {node}")
+                self.take_screenshot(f"LIVE CIRCUIT - {node} - {full_port}")
+                return "LIVE"
+            self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", checkbox)
+            # ------------------Click delete selected connections-----------
+            delete_button = wait.until(EC.element_to_be_clickable(
+                (By.XPATH, "//input[@type='SUBMIT' and @value='Delete selected connection(s)']")))
+            delete_button.click()
+            logger.info("Delete selected connection clicked")
+            time.sleep(1)
+            yes_button = wait.until(EC.element_to_be_clickable((By.XPATH, "//input[@type='BUTTON' and @value='No']")))
+            yes_button.click()
+            # yes_button = wait.until(EC.element_to_be_clickable((By.XPATH, "//input[@type='SUBMIT' and @value='Yes']")))
+            # yes_button.click()
+            # self.db_query.update_deletion_status(connection_id=connection_id, status=True, remarks="Tejas side nodes deleted, pending with other NMS")
+        except TimeoutException:
+            logger.warning("No circuits found for this node. Proceeding to next node.")
+            return
+
+    def process_csv_nodes(self, processed_rows, connection_id):
+        time.sleep(5)
+        results = []
+        overall_status = False
+        remarks_list = []
+        main_tab = self.driver.current_window_handle
+        self.open_manage_nodes()
+        WebDriverWait(self.driver, 5).until(EC.presence_of_element_located((By.XPATH, "//input[@class='dhx_combo_input']")))
+        manage_nodes_tab = self.driver.current_window_handle
+        processed_keys = set()
+        processed_rows = sorted(processed_rows, key=lambda x : x.get("priority", False), reverse=True)
+        for row in processed_rows:
+            key = f"{row['node']}_{row['card']}_{row['port']}_{row['jklm']}"
+            if key in processed_keys:
+                logger.info(f"skipping duplicates execution:{key}")
+                continue
+            processed_keys.add(key)
+            node = row["node"]
+            card = row["card"]
+            port = row["port"]
+            jklm = row["jklm"]
+            full_port = row["full_port"]
+            logical_resource = row["logical_resource"]
+            port_upper = str(full_port).upper()
+            manufacturer = self.db_query.get_device_manufacturer(node)
+            if not manufacturer:
+                logger.info(f"[FILTER] {node} -> UNKNOWN")
+                results.append({
+                    "connection_id":connection_id,
+                        "node":node,
+                        "port":full_port,
+                        "logical_resource":logical_resource,
+                        "status":"SKIPPED",
+                        "remarks":"UNKNOWN"
+                })
+                continue
+            if manufacturer.upper() != "TEJAS":
+                logger.info(f"[FILTER] {node} -> {manufacturer} (no login)")
+                results.append({
+                    "connection_id":connection_id,
+                        "node":node,
+                        "port":full_port,
+                        "logical_resource":logical_resource,
+                        "status":manufacturer.upper(),
+                        "remarks":manufacturer.upper()
+                        })
+                continue
+            logger.info(f"[FILTER] {node} -> TEJAS (processing)")
+            if "E1" in port_upper or "VCG" in port_upper:
+                logger.info(f"[NE PRECHECK] node: {node}, port:{full_port}")
+                flow_status = self.check_traffic_flow(node, full_port)
+                logger.info(f"Flow status for {node}: {flow_status}")
+                if flow_status == "failed":
+                    logger.error("Node open failed -> skipping")
+                    continue
+                if flow_status != "unavailable":
+                    logger.info("LIVE traffic -> skipping deletion")
+                    results.append({
+                        "connection_id":connection_id,
+                        "node":node,
+                        "port":full_port,
+                        "logical_resource":logical_resource,
+                        "status":"SKIPPED",
+                        "remarks":"Live traffic present"
+                    })
+                    continue
+            status = None
+            remarks = None
+            is_priority = row.get("priority", False)
+            try:
+                time.sleep(2)
+                if jklm:
+                    result = self.ne_level_deletion(
+                        node=node,
+                        card=card,
+                        port=port,
+                        stm=str(jklm).split("-")[0],
+                        jklm=jklm,
+                        full_port=full_port,
+                        circuit_type="OPTICAL",
+                        is_priority=is_priority
+                    )
+                else:
+                    time.sleep(2)
+                    result = self.ne_level_deletion(
+                        node=node,
+                        card=card,
+                        port=port,
+                        stm=None,
+                        jklm=None,
+                        full_port=full_port,
+                        circuit_type="ETH",
+                        is_priority=is_priority
+                    )
+                logger.info(f"[NE RESULT] {result}")
+                if result == "LIVE":
+                    logger.info(f"[STOP PROCESSING] live circuit found for {connection_id}")
+                    break
+                status = "TEJAS"
+                   
+                if result == "success":
+                    remarks = "Deleted successfully"
+                else:
+                    remarks = "FAILED"
+           
+            except Exception as e:
+                logger.info(f"Error in deletion for {node}:{e}")
+                status = "TEJAS"
+                remarks = "Deletion Failed"
+            finally:
+                try:
+                   self.driver.switch_to.window(manage_nodes_tab)
+                   self.driver.switch_to.default_content()
+                except Exception as e:
+                    logger.warning(f"Tab switch failed:{e}")
+            if status != "Deleted successfully":
+                overall_status = True
+                remarks_list.append(f"{node}:{remarks}")
+ 
+            results.append({
+                "connection_id": connection_id,
+                "node": node,
+                "port": full_port,
+                "logical_resource": logical_resource,
+                "status": status,
+                "remarks": remarks
+            })
+        try:
+            self.driver.switch_to.window(manage_nodes_tab)
+            self.driver.close()
+            self.driver.switch_to.window(main_tab)
+        except Exception as e:
+            logger.warning(f"Final tab cleanup failed:{e}")
+        # ---------------- SAVE CSV ----------------
+        df_result = pd.DataFrame(results)
+        file_path = ASSETS_DIR / f"ne_level_deletion_results_{timestamp}.csv"
+        if os.path.exists(file_path):
+            df_old = pd.read_csv(file_path)
+            df_result = pd.concat([df_old, df_result], ignore_index=True)
+        df_result = df_result.drop_duplicates(subset=["connection_id", "node", "port"])
+ 
+        df_result.to_csv(file_path, index=False)
+        logger.info(f"[DONE] Results saved to {file_path}")
+        # final_remark = " | ".join(remarks_list) if remarks_list else "Tejas nodes deleted successfully"
+        final_remark = "Deleted Successfully"
+        self.db_query.update_deletion_status(connection_id=str(connection_id.strip()),
+                                                               status=overall_status,
+                                                               remarks=final_remark)
+        self.devices_df.loc[self.devices_df['connection_id'] == connection_id, 'status'] = 'SUCCESS' if overall_status else 'FAILED'
+        self.devices_df.loc[self.devices_df['connection_id'] == connection_id, 'remarks'] = final_remark
+ 
+ 
+        return results
+
+    def is_tejas_node(self, node):
+        manufacturer = self.db_query.get_device_manufacturer(node)
+        if manufacturer == "TEJAS":
+            logger.info(f"[FILTER] {node} -> TEJAS found")
+            return None
+        logger.info(f"[FILTER] {node} -> {manufacturer} skipping")
+        return False
+
+
+    def l2_eth_card(self, port_number, node, vcg_flow):
+        # eth_status  = {"cir_status":"live/non-live","alarm_info":[],"packet_flow": "available/unavailable"}
+        eth_status = {}
+        eth_status_9 = {}
+        # collect VCG status and packet flow for port 5
+        # Manage frames to enter "ticTopFrame"
+        self.switch_to_frames(self.driver, "nodeBodyFrame", "ticTopFrame")
+        status_5 = self.admin_oper_alarm(port_number)
+        # logger.info(f"L2 ETH| port {port_number} status: {status_5}")
+        eth_status["cir_status"] = status_5["cir_status"]
+        eth_status["alarm_info"] = status_5["alarm_info"]
+        # capture the packet flow status
+        # packet_flow = self.collect_packet_flow(port_number)
+        eth_status["packet_flow"] = vcg_flow
+        logger.info(f"L2 ETH|packet flow of port 5: {packet_flow}")
+        eth_status["packet_flow"] = packet_flow
+        if status_5["cir_status"] != "live":  # "Inactive":
+            # collect VCG status and packet flow for port 9
+            # click on port 9
+            l2_port = self.convert_port(port_number, "9")  # L2 port conversion
+            logger.info(f"L2_ETH: checking status for {l2_port}")
+            self.open_shelf_port(l2_port)
+            current_node = node
+            self.take_screenshot(f"VCG - {current_node} - {port_number}")
+            logger.info(f"L2_ETH: Clicked on port 9 successfully")
+            status_9 = self.admin_oper_alarm(l2_port)
+            logger.info(f"L2 ETH| port {port_number} status: {status_9}")
+            eth_status_9["cir_status"] = status_9["cir_status"]
+            eth_status_9["alarm_info"] = status_9["alarm_info"]
+            logger.info(f"L2_ETH: collected status for {l2_port} successfully")
+            packet_flow = self.collect_packet_flow(l2_port)
+            self.take_screenshot(f"VCG_PACKET_FLOW - {current_node} - {port_number}")
+            logger.info(f"L2_ETH| packet flow of port 9: {packet_flow}")
+            eth_status_9["packet_flow"] = packet_flow
+        elif status_5["cir_status"] == "live":
+            logger.info(f"Circuit is active in main port, hence protection port skipped")
+            return eth_status
+        else:
+            logger.info(f"L2_ETH: port 5 packet flow unknown")
+
+        if eth_status_9["cir_status"] == "live":
+            return eth_status_9
+        else:
+            return eth_status
+
+    def l1_eth_card(self, port_number, vcg_flow):
+        # result  = {"cir_status":"live/non-live","alarm_info":[],"packet_flow": "available/unavailable"}
+        wait = WebDriverWait(self.driver, 30)
+        result = {}
+        alarm_info = None
+
+        # Manage frames to enter "ticTopFrame"
+        self.switch_to_frames(self.driver, "nodeBodyFrame", "ticTopFrame")
+        table = wait.until(EC.presence_of_element_located(
+            (By.XPATH, "//table[caption/b[normalize-space()='Ports']]")))
+        # Get only data rows (rows that contain anchor inside <th>)
+        rows = table.find_elements(By.XPATH, ".//tr[th/a]")
+
+        eth_ports = []
+        vcg_ports = []
+        for row in rows:
+            try:
+                port_name = row.find_element(By.TAG_NAME, "a").text.strip()
+                columns = row.find_elements(By.TAG_NAME, "td")
+
+                admin_status = columns[0].text.strip()
+                oper_status = columns[1].text.strip()
+
+                port_info = {
+                    "port_name": port_name,
+                    "admin_status": admin_status,
+                    "oper_status": oper_status
+                }
+
+                if port_name.startswith("ETH"):
+                    eth_ports.append(port_info)
+
+                elif port_name.startswith("VCG"):
+                    vcg_ports.append(port_info)
+
+            except Exception as e:
+                logger.error(f"L1 ETH port status failed to capture due to {e} [dynamic DOM]")
+                continue
+
+        # find admin and operational status
+        if len(eth_ports) == len(vcg_ports):
+            for i in range(len(eth_ports)):
+                if port_number in eth_ports[i]["port_name"] or port_number in vcg_ports[i]["port_name"]:
+                    l1_eth_port = eth_ports[i]["port_name"]
+                    l1_vcg_port = vcg_ports[i]["port_name"]
+                    eth_ad_status = eth_ports[i]["admin_status"]
+                    eth_oper_status = eth_ports[i]["oper_status"]
+                    logger.info(f"ETH port: admin:{eth_ad_status},operation:{eth_oper_status}")
+                    vcg_ad_status = vcg_ports[i]["admin_status"]
+                    vcg_oper_status = vcg_ports[i]["oper_status"]
+                    logger.info(f"VCG port: admin:{vcg_ad_status},operation:{vcg_oper_status}")
+                    break
+        else:
+            logger.error(
+                f"length of eth_ports:{len(eth_ports)} does not match length of vcg_ports:{len(vcg_ports)}")
+
+        # Collect alarm info
+        if eth_ad_status == 'UP' and eth_oper_status == 'DOWN':
+            cir_st = "non-live"
+            result["cir_status"] = cir_st
+            logger.info(f"L1_ETH: ETH admin {eth_ad_status} Operation {eth_oper_status} | Nonlive")
+            alarm_info = self.collect_alarm_info(l1_eth_port)
+            if alarm_info:
+                if not alarm_info["alarms"]:
+                    logger.info(f"operation is down, however no alarm : {alarm_info["alarms"]}")
+                logger.info(f"L1 ETH port {l1_eth_port} alarm: {alarm_info}")
+            result["alarm_info"] = alarm_info
+            # Need to capture alarm info into database
+
+        elif eth_ad_status == 'DOWN' and eth_oper_status == 'DOWN':
+            cir_st = "non-live"
+            result["cir_status"] = cir_st
+            logger.info(f"L1_ETH: ETH admin {eth_ad_status} Operation {eth_oper_status} | Nonlive")
+            result["alarm_info"] = "NA"
+
+        elif eth_ad_status == 'UP' and eth_oper_status == 'UP':
+            if vcg_ad_status == 'UP' and vcg_oper_status == 'DOWN':
+                cir_st = "non-live"
+                result["cir_status"] = cir_st
+                logger.info(
+                    f"L1_ETH: ETH: {eth_ad_status}|{eth_oper_status} VCG: {vcg_ad_status}|{vcg_oper_status} | Non-live")
+                alarm_info = self.collect_alarm_info(l1_vcg_port)
+                if alarm_info:
+                    logger.info(f"L1 VCG port {l1_vcg_port} alarm: {alarm_info}")
+                result["alarm_info"] = alarm_info
+                # Need to capture alarm info into database
+
+            elif vcg_ad_status == 'DOWN' and vcg_oper_status == 'DOWN':
+                cir_st = "non-live"
+                logger.info(
+                    f"L1_ETH: ETH: {eth_ad_status}|{eth_oper_status} VCG: {vcg_ad_status}|{vcg_oper_status} | Non-live")
+                result["cir_status"] = cir_st
+                result["alarm_info"] = "NA"
+                # return result
+
+            elif vcg_ad_status == 'UP' and vcg_oper_status == 'UP':
+                cir_st = "live"
+                logger.info(
+                    f"L1_ETH: ETH: {eth_ad_status}|{eth_oper_status} VCG: {vcg_ad_status}|{vcg_oper_status} | Live")
+                result["cir_status"] = cir_st
+                result["alarm_info"] = "NA"
+                # return result
+        else:
+            logger.error(f"Unexpected port status found")
+
+        # get packet flow status (for default)
+        # packet_flow = self.collect_packet_flow(l1_vcg_port)
+        # result["packet_flow"] = vcg_flow
+        # print(f"packet flow: {packet_flow}")
+        # if packet_flow:
+        result["packet_flow"] = vcg_flow
+        # update to the database
+        logger.info(f"L1 ETH port {port_number} packet_flow: {vcg_flow}")
+        return result
+
+    def collect_alarm_info(self, port_number):
+        wait = WebDriverWait(self.driver, 30)
+        alarm_data = {}
+        alarm_info = None
+        # Manage frames to enter "nodeBodyFrame --> cardAlarmsFrame"
+        self.driver.switch_to.default_content()
+        self.switch_to_frames(self.driver, "nodeBodyFrame", "cardAlarmsFrame")
+        # click on stop refresh button
+        # locate the Stop Refreshing button
+        submit_btn = wait.until(EC.presence_of_element_located(
+            (By.XPATH, "//input[@type='SUBMIT' and @value='Stop Refresh']")))
+        # JavaScript click
+        self.driver.execute_script("arguments[0].click();", submit_btn)
+        # print("Alarm-Frame: clicked on stop refresh btn successfully")
+        all_alarms = f"//tr[td[5][normalize-space()='{port_number}']]/td[3]"
+        elements = self.driver.find_elements(By.XPATH, all_alarms)
+        alarm_list = [el.text.strip() for el in elements if el.text.strip()]
+        alarm_info = ", ".join(alarm_list)
+        all_occur = f"//tr[td[5][normalize-space()='{port_number}']]/td[2]"
+        elements = self.driver.find_elements(By.XPATH, all_occur)
+        occur_list = [el.text.strip() for el in elements if el.text.strip()]
+        occur_info = ", ".join(occur_list)
+
+        if alarm_info == "":
+            logger.info(f"No alarm found for port {port_number}")
+            alarm_data["occurrence"] = []
+            alarm_data["alarms"] = []
+            # return alarm_list  # "No alarm"
+            return alarm_data
+        else:
+            logger.info(f"Alarm info collected successfully for port {port_number}")
+            alarm_data["occurrence"] = occur_list
+            alarm_data["alarms"] = alarm_list
+            # return alarm_list
+            return alarm_data
+
+    def admin_oper_alarm(self, port_name):
+        wait = WebDriverWait(self.driver, 60)
+        # result  = {"cir_status":"live/non-live","alarm_info":[],"packet_flow": "available/unavailable"}
+        result = {}
+        result["packet_flow"] = "NA"
+        alarm_info = None
+        port_number = port_name
+        logger.info(f"Collecting admin & Operational status for {port_number}")
+        # Manage frames to enter "ticTopFrame"
+        self.switch_to_frames(self.driver, "nodeBodyFrame", "ticTopFrame")
+        # Fetch Admin and Operational Status for given ports
+        admin_st_ele = f"//a[normalize-space(.)='{port_number}']/ancestor::tr/td[1]"
+        oper_st_ele = f"//a[normalize-space(.)='{port_number}']/ancestor::tr/td[2]"
+        admin_status = wait.until(EC.presence_of_element_located((By.XPATH, admin_st_ele))).text
+        operational_status = wait.until(EC.presence_of_element_located((By.XPATH, oper_st_ele))).text
+        if admin_status.strip().upper() == "UP" and operational_status.strip().upper() == "DOWN":
+            # print(f"admin_status: {admin_status}\noperational status: {operational_status}| Non-live circuit")
+            cir_st = "non-live"
+            result["cir_status"] = cir_st
+            # collect alarm information
+            alarm_info = self.collect_alarm_info(port_name)
+            logger.info(f"E1 port {port_number} alarm info: {alarm_info}")
+            logger.info(f"E1 port {port_number} admin:{admin_status},operational:{operational_status}|Non-live")
+            result["alarm_info"] = alarm_info
+            return result
+        elif admin_status.strip().upper() == "DOWN" and operational_status.strip().upper() == "DOWN":
+            logger.info(f"E1 port {port_number} admin:{admin_status},operational:{operational_status}|Non-live")
+            cir_st = "non-live"
+            result["cir_status"] = cir_st
+            result["alarm_info"] = "NA"
+            return result
+        elif admin_status.strip().upper() == "UP" and operational_status.strip().upper() == "UP":
+            logger.info(f"E1 port {port_number} admin:{admin_status},operational:{operational_status}|Live")
+            cir_st = "live"
+            result["cir_status"] = cir_st
+            result["alarm_info"] = "NA"
+            return result
+        else:
+            logger.error(
+                f"Unexpected status: E1 port {port_number} admin:{admin_status},operational:{operational_status}")
+            cir_st = "unknown"
+            result["cir_status"] = cir_st
+            result["alarm_info"] = "unknown"
+            return result
+
+    def main_process(self):
+        logger.info("Starting Circuit Processing")
+        self.devices_df = self.db_query.get_ais_circuit_data(self.filepath)
+        self.devices_df['status'] = ''
+        self.devices_df['remarks'] = ''
+        total_records = len(self.devices_df)
+        print("Total nodes:", total_records)
+        csv_processor = NeLevelDeletion(self.db_query)
+        for index, row in self.devices_df.iterrows():
+            label = row.get("label")
+            connection_id = row.get("connection_id")
+            tjs_id = str(row.get("tjs_id", "")).strip()
+            service_name = str(row.get("service_name", "")).strip()
+            zone = row.get("zone")
+            start_time = time.time()
+            logger.info(f"Processing node: {label} | {connection_id} | {tjs_id} | {service_name} | {zone}")
+            logger.info("_" * 80)
+            logger.info(f"START: {connection_id}")
+            logger.info("_" * 80)
+            try:
+                if self.driver is None:
+                    self.driver = self.login_manager.process_node(row)
+                result = self.nms_level_deletion(row, index)
+                if isinstance(result, dict) and result.get("status", "").strip().upper() == "ADRS":
+                    logger.info(f"[ADRS FLOW] Processing {connection_id}")
+                    csv_path = csv_processor.run(input_data=result)
+                    if csv_path:
+                        self.process_csv_nodes(csv_path, connection_id)
+            except Exception as e:
+                logger.exception(f"Node failed: {label} due to {e}")
+            logger.info("_" * 80)
+            logger.info(f"END: {connection_id}")
+            logger.info("_" * 80 + "\n")
+            end_time = time.time()
+            total_time = round(end_time - start_time, 2)
+            logger.info(f"Circuit {connection_id} took {total_time} seconds")
+        logger.info("Tejas Automation run completed")
+        output_path = ASSETS_DIR / f"final_results_{timestamp}.csv"
+        self.devices_df.to_csv(output_path, index=False)
+        self.finalize_pdf()
+        if self.driver:
+            self.driver.quit()
+
+
+
+
+
