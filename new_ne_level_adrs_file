@@ -1,0 +1,223 @@
+
+import os
+import re
+
+import pandas as pd
+from db_querys import DbQuery
+from tejas_utils import load_config
+from common_libs.logger import logger
+from pathlib import Path
+import datetime
+
+SS_DIR = Path(__file__).parent / "screenshots"
+
+class NeLevelDeletion:
+    def __init__(self, db_query):
+        self.db = db_query
+        config = load_config(self)
+        self.resource_files = config["paths"]["resource_files"]
+        self.resource_cache = {}
+        logger.info(f"[INIT] Loaded zones: {list(self.resource_files.keys())}")
+        self.non_tejas_data = []
+
+    # ---------------- LOAD CSV BASED ON ZONE ----------------
+    def get_resource_df(self, zone):
+        if not zone:
+            logger.warning("[CSV] Zone is empty")
+            return None
+        zone = str(zone).strip().lower()
+        logger.info(f"[CSV] Requested zone: {zone}")
+        if zone not in self.resource_files:
+            logger.error(f"[CSV] Zone not found in config: {zone}")
+            return None
+        if zone not in self.resource_cache:
+            path = self.resource_files[zone]
+            logger.info(f"[CSV] Loading CSV for zone '{zone}' → {path}")
+            try:
+                df = pd.read_csv(path)
+                df.columns = df.columns.str.strip()
+                logger.info(f"[CSV] Loaded rows: {len(df)} | Columns: {list(df.columns)}")
+                self.resource_cache[zone] = df
+            except Exception as e:
+                logger.error(f"[CSV] Failed to load CSV: {e}")
+                return None
+        else:
+            logger.info(f"[CSV] Using cached CSV for zone: {zone}")
+        return self.resource_cache[zone]
+
+    def extract_to_csv(self, input_data):
+        connection_id = str(input_data.get("connection_id", "")).strip()
+        service_name = str(input_data.get("service_name", "")).strip()
+        zone = input_data.get("zone")
+
+        df_res = self.get_resource_df(zone)
+        if df_res is None:
+            return None
+
+        df_res["Circuit Name"] = df_res["Circuit Name"].astype(str).str.strip()
+        df_match = df_res[
+            df_res["Circuit Name"].str.contains(service_name, na=False)
+        ]
+        print("Total matched rows:", len(df_match))
+        if df_match.empty:
+            logger.warning(f"[CSV] No search results found | Service name: {service_name} | Connection ID: {connection_id}")
+            return None
+        rows = []
+        for _, r in df_match.iterrows():
+            rows.append({
+                "connection_id": connection_id,
+                "a_node": r.get("A End Node(Label)"),
+                "a_port": r.get("A End Port(Label)"),
+                "z_node": r.get("Z End Node(Label)"),
+                "z_port": r.get("Z End Port(Label)"),
+                "logical_resource": r.get("Logical Resource"),
+                "end_ne": r.get("End NE"),
+                "end_ctp": r.get("End CTP")
+            })
+
+        df_new = pd.DataFrame(rows)
+        df_new = df_new.drop_duplicates()
+        return df_new
+
+    def process_extracted_csv(self, df, connection_id):
+
+        processed_rows = []
+        previous_keys = set()
+
+        for index in df.index:
+
+            a_node = df.at[index, "a_node"]
+            a_port = str(df.at[index, "a_port"]).strip()
+            z_node = df.at[index, "z_node"]
+            z_port = str(df.at[index, "z_port"]).strip()
+            logical_resource = str(df.at[index, "logical_resource"]).strip()
+            end_ne = str(df.at[index, "end_ne"]).strip()
+            end_ctp = str(df.at[index, "end_ctp"]).strip()
+            nodes_to_process = []
+
+            if a_node and a_node != "nan" and not a_node.upper().startswith("VNE"):
+                nodes_to_process.append({
+                    "node": a_node,
+                    "port":a_port,
+                    "logical_resource": logical_resource
+                })
+            
+            if z_node and z_node != "nan" and not z_node.upper().startswith("VNE"):
+                nodes_to_process.append({
+                    "node": z_node,
+                    "port":z_port,
+                    "logical_resource": logical_resource
+                })
+            if end_ne and end_ne != "nan" and not end_ne.upper().startswith("VNE"):
+                if end_ctp and end_ctp != "nan":
+                    nodes_to_process.append({
+                        "node": end_ne,
+                        "port": end_ctp
+                    })
+            logger.info(f"Total nodes_to_process:{len(nodes_to_process)}")
+            for n in nodes_to_process:
+                logger.info(f"Node added:{n}")
+
+            for item in nodes_to_process:
+                node = item["node"]
+                port_val = item["port"]
+                logical = item.get("logical_resource","")
+                key= f"{index}_{node}_{port_val}"
+                card = None
+                port = None
+                jklm = None
+                upper_port = str(port_val).upper()
+                upper_port = upper_port.replace(" ", "-")
+
+
+                try:
+                    if "J-KLM" in upper_port:
+                        parts = upper_port.split(":")
+                        stm_part = parts[0].strip()
+                        m = re.search(r"STM\d+-(\d+)-(\d+)-(\d+)",stm_part)
+                        if m:
+                            card = f"{m.group(1)}-{m.group(2)}"
+                            port = m.group(3)
+                        if len(parts) >= 3:
+                            jklm_part = parts[-1].strip()
+                            nums = re.findall(r"\d+", jklm_part)
+                            if len(nums) >= 4:
+                                jklm = "-".join(nums[:4])
+                    else:
+                        if upper_port.startswith("STM"):
+                            m = re.search(r"STM\d+-(\d+)-(\d+)-(\d+)", upper_port)
+                            if m:
+                                card = f"{m.group(1)}-{m.group(2)}"
+                                port = m.group(3)
+
+                            nums = re.findall(r"\d+", logical)
+                            if len(nums) >= 4:
+                                jklm = "-".join(nums[:4])
+
+                        elif upper_port.startswith("VCG"):
+                            m = re.search(r"VCG-(\d+)-(\d+)-(\d+)", upper_port)
+                            if m:
+                                card = f"{m.group(1)}-{m.group(2)}"
+                                port = m.group(3)
+
+                        elif upper_port.startswith("ETH"):
+                            m = re.search(r"ETH-(\d+)-(\d+)-(\d+)", upper_port)
+                            if m:
+                                card = f"{m.group(1)}-{m.group(2)}"
+                                port = m.group(3)
+
+                        elif upper_port.startswith("E1"):
+                            m = re.search(r"E1-(\d+)-(\d+)-(\d+)", upper_port)
+                            if m:
+                                card = f"{m.group(1)}-{m.group(2)}"
+                                port = m.group(3)
+
+                        else:
+                            numbers = re.findall(r"\d+", upper_port)
+                            if len(numbers) >= 3:
+                                last_three = numbers[-3:]
+                                card = f"{last_three[0]}-{last_three[1]}"
+                                port = last_three[2]
+                            elif len(numbers) == 2:
+                                card = f"{numbers[0]}-{numbers[1]}"
+                            elif len(numbers) == 1:
+                                port = numbers[0]
+
+                            if logical_resource:
+                                nums = re.findall(r"\d+", logical_resource)
+                                if len(nums) >= 4:
+                                    jklm = "-".join(nums[:4])
+
+                except Exception as e:
+                    print(f"Error parsing row {index}: {e}")
+                    continue
+                key = (node, card, port, jklm)
+                if key in previous_keys:
+                    continue
+                previous_keys.add(key)
+
+                processed_rows.append({
+                    "connection_id": connection_id,
+                    "node": node,
+                    "full_port": port_val,
+                    "logical_resource": logical_resource,
+                    "card": card,
+                    "port": port,
+                    "jklm": jklm
+                })
+
+        return processed_rows
+
+    def run(self, input_data):
+        try:
+            df = self.extract_to_csv(input_data)
+            if df is None or df.empty:
+                return None
+            processed_data = self.process_extracted_csv(
+                df,
+                input_data.get("connection_id")
+            )
+            return processed_data
+        except Exception as e:
+            logger.error(f"[PARSE ERROR] {e}")
+            return None
