@@ -1,0 +1,357 @@
+import os
+import sys
+import hashlib
+import ui.upload_page as upload_page
+from tkinter import *
+import multiprocessing
+from tkinter import messagebox
+from PIL import Image, ImageTk
+from datetime import datetime, date
+from ui.user_info import NetworkCredentialsForm
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+img_path = os.path.join(BASE_DIR, "images")
+
+if getattr(sys, "frozen", False):
+    multiprocessing.set_executable(sys.executable)
+
+class GlassButtonsUI:
+
+    BTN_BG = "#1e1e2e"
+    BTN_BG_HOVER = "#2a2a3d"
+    BTN_BORDER = "#4a4a5e"
+    BTN_BORDER_HOVER = "#6a6a80"
+
+    def __init__(self, window):
+
+        self.window = window
+        self.window.title("Tejas Live/Non-Live Circuit Segregation")
+        self.window.state("zoomed")
+        self.window.configure(bg="#0b1a31")
+
+        # Only Button-1 enabled initially
+        self.all_enabled = True
+
+        self.canvas = Canvas(self.window, highlightthickness=0)
+        self.canvas.pack(fill="both", expand=True)
+
+        self.bg_photo = None
+        self.left_logo = None
+        self.right_logo = None
+        self.center_logo = None
+
+        self.canvas.bind("<Configure>", self.draw_ui)
+
+    # ================= DRAW UI =================
+    def draw_ui(self, event=None):
+
+        self.canvas.delete("all")
+
+        width = self.canvas.winfo_width()
+        height = self.canvas.winfo_height()
+
+        # ---------- BACKGROUND ----------
+        bg = Image.open(os.path.join(img_path, "test_blue.png")).resize((width, height))
+        self.bg_photo = ImageTk.PhotoImage(bg)
+        self.canvas.create_image(0, 0, image=self.bg_photo, anchor="nw")
+
+        # ---------- LOGOS ----------
+        left = Image.open(os.path.join(img_path, "tctslogo.png")).resize((260, 70))
+        self.left_logo = ImageTk.PhotoImage(left)
+        self.canvas.create_image(30, 20, image=self.left_logo, anchor="nw")
+
+        right = Image.open(os.path.join(img_path, "Tata-Group-Logo-White.png")).resize((60, 50))
+        self.right_logo = ImageTk.PhotoImage(right)
+        self.canvas.create_image(width - 90, 25, image=self.right_logo, anchor="nw")
+
+        center = Image.open(os.path.join(img_path, "neu_automation.png")).resize((260, 85))
+        self.center_logo = ImageTk.PhotoImage(center)
+        self.canvas.create_image(width // 2, 90, image=self.center_logo, anchor="center")
+
+        # ---------- TITLE ----------
+        self.canvas.create_text(
+            width // 2,
+            155,
+            text="Tejas Live/Non-Live Circuit Segregation",
+            fill="white",
+            font=("Segoe UI", 18, "bold")
+        )
+        button_data = [
+            ("🖧", "Data Extraction", 1),  # Network node / server
+            ("🔨🚨", "AIS Injection",2),  # Network design / topology
+            ("📡❌", "Non-Live Deletion",3),  # Network design / topology
+            ("📊", "Planning & Feasibility", 4),  # Signal / trace
+        ]
+
+        card_w = 240
+        card_h = 170
+        spacing = 60
+
+        total_width = (card_w * len(button_data)) + (spacing * (len(button_data) - 1))
+        start_x = (width - total_width) // 2
+        y_pos = height // 2 - 80
+
+        for i, (icon, label, num) in enumerate(button_data):
+
+            x_pos = start_x + i * (card_w + spacing)
+
+            self.create_dashboard_button(
+                x_pos,
+                y_pos,
+                card_w,
+                card_h,
+                icon,
+                label,
+                num
+            )
+
+        # ---------- FOOTER ----------
+        current_year = datetime.now().year
+        footer = f"© 2020 - {current_year} Tata Communications Transformation Services. All rights reserved."
+
+        self.canvas.create_text(
+            width - 20,
+            height - 20,
+            text=footer,
+            fill="white",
+            font=("Segoe UI", 10),
+            anchor="se"
+        )
+
+    # ================= DASHBOARD BUTTON =================
+    def create_dashboard_button(self, x, y, w, h, icon, label, number):
+
+        from PIL import Image, ImageDraw, ImageOps
+
+        enabled = True if number == 1 else self.all_enabled
+        radius = 20
+        margin = 4
+
+        # ---- background crop ----
+        bg_img = Image.open(os.path.join(img_path, "test_blue.png"))
+        bg_img = bg_img.resize((self.canvas.winfo_width(), self.canvas.winfo_height()))
+        crop = bg_img.crop((x, y, x + w, y + h))
+
+        if not enabled:
+            crop = ImageOps.grayscale(crop).convert("RGBA")
+
+        # ---- rounded mask ----
+        mask = Image.new("L", (w, h), 0)
+        draw = ImageDraw.Draw(mask)
+
+        draw.rounded_rectangle(
+            (margin, margin, w - margin, h - margin),
+            radius=radius,
+            fill=255
+        )
+
+        rounded = Image.new("RGBA", (w, h))
+        rounded.paste(crop, (0, 0), mask)
+
+        # ---- border ----
+        border_draw = ImageDraw.Draw(rounded)
+        border_draw.rounded_rectangle(
+            (margin, margin, w - margin, h - margin),
+            radius=radius,
+            outline="#c9f4ff" if enabled else "#777777",
+            width=2
+        )
+
+        btn_photo = ImageTk.PhotoImage(rounded)
+
+        if not hasattr(self, "button_images"):
+            self.button_images = []
+        self.button_images.append(btn_photo)
+
+        rect = self.canvas.create_image(x, y, image=btn_photo, anchor="nw")
+
+        # ---- hover outline ----
+        hover = self.create_round_rect(
+            x + margin,
+            y + margin,
+            x + w - margin,
+            y + h - margin,
+            r=radius,
+            outline="",
+            width=3,
+            fill=""
+        )
+
+        # ---- center positions ----
+        center_x = x + w // 2
+
+        icon_y = y + 55
+        text_y = y + 115
+
+
+        # ---- icon ----
+        icon_id = self.canvas.create_text(
+            center_x,
+            icon_y,
+            text=icon,
+            font=("Segoe UI Symbol", 48),
+            fill="white" if enabled else "#aaaaaa"
+        )
+
+        # ---- label ----
+        text_id = self.canvas.create_text(
+            center_x,
+            text_y,
+            text=label,
+            font=("Segoe UI", 14, "bold"),
+            fill="white" if enabled else "#aaaaaa"
+        )
+
+        # ---- hover events ----
+        def on_enter(e):
+            if enabled:
+                self.canvas.itemconfig(hover, outline="#d9f7ff")
+
+        def on_leave(e):
+            if enabled:
+                self.canvas.itemconfig(hover, outline="")
+
+        def on_click(e):
+            if enabled:
+                self.handle_click(number)
+
+        for item in (rect, hover, icon_id, text_id):
+            self.canvas.tag_bind(item, "<Enter>", on_enter)
+            self.canvas.tag_bind(item, "<Leave>", on_leave)
+            self.canvas.tag_bind(item, "<Button-1>", on_click)
+
+    def create_round_rect(self, x1, y1, x2, y2, r=20, **kwargs):
+
+        points = [
+            x1 + r, y1,
+            x2 - r, y1,
+            x2, y1,
+            x2, y1 + r,
+            x2, y2 - r,
+            x2, y2,
+            x2 - r, y2,
+            x1 + r, y2,
+            x1, y2,
+            x1, y2 - r,
+            x1, y1 + r,
+            x1, y1
+        ]
+
+        return self.canvas.create_polygon(points, smooth=True, **kwargs)
+
+
+    # ================= CLICK LOGIC =================
+    def handle_click(self, number):
+
+        if number == 1:
+            self.window.withdraw()
+            new_window = Toplevel(self.window)
+            NetworkCredentialsForm(new_window, self.on_index_complete)
+
+        elif number == 2:
+            upload_page.UploadPage(
+                self.window,
+                self.on_index_complete,
+                heading_text="Upload Circuit File"
+            )
+
+        elif number == 3:
+            upload_page.UploadPage(
+                self.window,
+                self.on_index_complete,
+                heading_text="Upload Validation Report"
+            )
+
+        elif number == 4:
+            upload_page.UploadPage(
+                self.window,
+                self.on_index_complete,
+                heading_text="Upload Final Approval Document"
+            )
+
+    # ================= CALLBACK =================
+    def on_index_complete(self, success=False):
+
+        self.window.deiconify()
+        self.window.state("zoomed")
+
+        if success:
+            self.all_enabled = True
+
+        self.draw_ui()
+
+    def check_expiry_and_clock(self):
+        EXPIRY_DATE = date(2026, 9, 30)
+        today = date.today()
+
+        # ---- Hard expiry ----
+        if today > EXPIRY_DATE:
+            messagebox.showerror(
+                "Application Expired",
+                "This application expired.\nPlease contact administrator."
+            )
+            return False
+
+        store_file = os.path.join(os.getcwd(), ".tcts_webq_last_run.dat")
+
+        def encode(d):
+            return hashlib.sha256(d.isoformat().encode()).hexdigest()
+
+        # ---- First run ----
+        if not os.path.exists(store_file):
+            try:
+                with open(store_file, "w") as f:
+                    f.write(f"{today.isoformat()}|{encode(today)}")
+            except Exception:
+                pass
+            return True
+
+        # ---- Read stored data ----
+        try:
+            with open(store_file, "r") as f:
+                content = f.read().strip()
+                last_date_str, last_hash = content.split("|")
+                last_date = date.fromisoformat(last_date_str)
+        except Exception:
+            return False  # corrupted file → block
+
+        # ---- Tamper detection ----
+        if encode(last_date) != last_hash:
+            messagebox.showerror(
+                "Data Tampered",
+                "Application data integrity check failed."
+            )
+            return False
+
+        # ---- Clock rollback detection ----
+        if today < last_date:
+            messagebox.showerror(
+                "System Date Error",
+                "System date appears to have been modified.\nApplication use is blocked."
+            )
+            return False
+        # ---- Update last run ----
+        try:
+            with open(store_file, "w") as f:
+                f.write(f"{today.isoformat()}|{encode(today)}")
+        except Exception:
+            pass
+
+        return True
+
+def main():
+
+    root = Tk()
+    app = GlassButtonsUI(root)
+    if not app.check_expiry_and_clock():
+        root.destroy()
+        return
+    root.mainloop()
+
+
+# index.py #(your entrypoint)
+
+if __name__ == "__main__":
+    multiprocessing.freeze_support()
+    multiprocessing.set_start_method("spawn", force=True)
+    main()
