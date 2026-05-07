@@ -24,11 +24,13 @@ from tejas_utils import *
 from common_libs.logger import logger
 from ne_level_adrs_deletion import NeLevelDeletion
 
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 BASE_DIR = Path(__file__).parent
 SS_DIR = Path(__file__).parent / "screenshots"
 EXPORT_DIR = Path(__file__).parent / "exports"
 ASSETS_DIR = Path(__file__).parent / "assets" / "non_live_circuit_deletion" 
-timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+RUN_DIR = ASSETS_DIR / timestamp
+RUN_DIR.mkdir(parents=True, exist_ok=True)
 
 class NonLiveCircuitDeletion:
 
@@ -43,7 +45,7 @@ class NonLiveCircuitDeletion:
         self.filepath = filepath
         self.elements = []
         self.styles = getSampleStyleSheet()
-        self.current_pdf = str(ASSETS_DIR / f"screenshots_{timestamp}.pdf")
+        self.current_pdf = str(RUN_DIR / f"screenshots_{timestamp}.pdf")
 
     def home_page(self):
         wait = WebDriverWait(self.driver, 10)
@@ -347,13 +349,6 @@ class NonLiveCircuitDeletion:
                         logger.info(f"Special state detected:{state}")
                         self.take_screenshot(f"Direct state-{label}")
 
-                    # if is_tejas:
-                    #     if circuit_id not in label:
-                    #         continue
-                    # else:
-                    #     if label != circuit_id:
-                    #         continue
-
                     if state not in allowed_states:
                         delete_flag = False
                         logger.info(f"State {state} not eligible for deletion")
@@ -362,7 +357,6 @@ class NonLiveCircuitDeletion:
                     valid_rows.append(r)
 
                 if not delete_flag:
-                    # logger.info(f"Circuit {circuit_id} not found in Manage Circuits")
                     self.db_query.update_deletion_status(
                         connection_id=circuit_id,
                         status=False,
@@ -700,8 +694,10 @@ class NonLiveCircuitDeletion:
                 oper = str(status.get("operational", "")).lower()
                 cir = str(status.get("cir_status", "")).lower()
                 logger.info(f"DEBUG -> cir_status: {cir}, operational:{oper}")
-                if "non" in cir or "live" in cir:
+                if "non" in cir:
                     return "unavailable"
+                elif "live" in cir:
+                    return "available"
                 elif "down" in oper:
                     return "unavailable"
                 else:
@@ -786,13 +782,9 @@ class NonLiveCircuitDeletion:
             else:
                 node = a_node
                 port_value = a_port_value
-
-
-        # port_value = port_value.upper()
         parts = port_value.split("-")
 
         port = "-".join(parts[:4])
-        # timeslot = "-".join(parts[4:])
         if port_value.startswith("STM") and len(parts) > 4:
             timeslot = "-".join(parts[4:])
         else:
@@ -804,11 +796,9 @@ class NonLiveCircuitDeletion:
         node_input = wait.until(
             EC.element_to_be_clickable((By.XPATH, "(//input[@class='dhx_combo_input'])[1]"))
         )
-        # # character_typing(node_input, node)
         node_input.send_keys(node)
         time.sleep(2)
         node_input.send_keys(Keys.ENTER)
-        # print(f"Node entered: {node}")
         time.sleep(2)
 
         port_input = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[@id='tpBrowser']")))
@@ -818,18 +808,14 @@ class NonLiveCircuitDeletion:
         search_box = WebDriverWait(self.driver, 5).until(
             EC.visibility_of_element_located((By.XPATH, "//div[contains(text(),'TejNms')]/following::input[1]"))
         )
-        # character_typing(search_box, port)
         search_box.send_keys(port)
         time.sleep(0.5)
         search_box.send_keys(Keys.ENTER)
-        # print(f"STM entered: {port}")
         time.sleep(1)
         port = port.strip()
-        # print("port from DB: ", port)
         stm_element = WebDriverWait(self.driver, 20).until(
             EC.element_to_be_clickable((By.XPATH, f"//div[@class='objbox']//span[text()='{port}']")))
         self.driver.execute_script("arguments[0].click();", stm_element)
-        # print(f"STM clicked: {stm_element}")
 
         ok_btn = WebDriverWait(self.driver, 10).until(EC.element_to_be_clickable((By.XPATH, "//*[@id='win_ok']")))
         ok_btn.click()
@@ -837,7 +823,6 @@ class NonLiveCircuitDeletion:
         if timeslot:
             timeslot_input = WebDriverWait(self.driver, 10).until(
                 EC.visibility_of_element_located((By.XPATH, "//*[@id='timeslot']")))
-            # character_typing(timeslot_input, timeslot)
             timeslot_input.send_keys(timeslot)
             time.sleep(0.5)
             timeslot_input.send_keys(Keys.ENTER)
@@ -946,7 +931,6 @@ class NonLiveCircuitDeletion:
 
                 if option_text == j:
                     select_stmno.select_by_visible_text(option_text)
-                    # print("selected STMNo:", option_text)
                     found = True
                     break
 
@@ -1161,7 +1145,7 @@ class NonLiveCircuitDeletion:
             logger.warning(f"Final tab cleanup failed:{e}")
         # ---------------- SAVE CSV ----------------
         df_result = pd.DataFrame(results)
-        file_path = ASSETS_DIR / f"ne_level_deletion_results_{timestamp}.csv"
+        file_path = RUN_DIR / f"ne_level_deletion_results_{timestamp}.csv"
         if os.path.exists(file_path):
             df_old = pd.read_csv(file_path)
             df_result = pd.concat([df_old, df_result], ignore_index=True)
@@ -1433,9 +1417,9 @@ class NonLiveCircuitDeletion:
             result["alarm_info"] = "unknown"
             return result
 
-    def main_process(self):
+    def main_process(self, filepath):
         logger.info("Starting Circuit Processing")
-        self.devices_df = self.db_query.get_ais_circuit_data(self.filepath)
+        self.devices_df = self.db_query.get_ais_circuit_data(filepath)
         self.devices_df['status'] = ''
         self.devices_df['remarks'] = ''
         total_records = len(self.devices_df)
@@ -1470,7 +1454,7 @@ class NonLiveCircuitDeletion:
             total_time = round(end_time - start_time, 2)
             logger.info(f"Circuit {connection_id} took {total_time} seconds")
         logger.info("Tejas Automation run completed")
-        output_path = ASSETS_DIR / f"final_results_{timestamp}.csv"
+        output_path = RUN_DIR / f"final_results_{timestamp}.csv"
         self.devices_df.to_csv(output_path, index=False)
         self.finalize_pdf()
         if self.driver:
