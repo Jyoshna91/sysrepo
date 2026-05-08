@@ -1,0 +1,156 @@
+import time
+from datetime import timedelta
+from db_querys import DbQuery
+from common_libs.logger import logger
+from login import TejasAutomation
+from sdh_circuit_processor import SDHCircuitProcessor
+from segregate_live_nonlive import TejasLiveNonlive
+from non_live_circuit_deletion import NonLiveCircuitDeletion
+from post_crq_ais_injector import PostCrqAisInjector
+from extract_adrs_dump import ADRSDataExtraction
+from extract_adrs_tu_au_case import TUAUUseCaseDataExtraction
+
+class ProjectPipeline:
+    def __init__(self, label):
+        self.label =  label
+        # DB init here
+        self.db_query = DbQuery()
+        self.circuit_ops = None
+        logger.info("############ Tejas Login Object Created!!.############")
+        self.login_manager = TejasAutomation(self.label)
+
+    def tjs_login_call(self):
+        # Tejas NMS Login Process with driver setup
+        self.login_manager = TejasAutomation()
+        self.login_manager.get_config_data()
+
+    def m1_module(self, label):
+        logger.info("############ Data Extraction Module Initiated!!.############")
+        m1_start_time = time.perf_counter()
+        print(label)
+
+        self.login_manager.get_config_data() #Tejas Login
+        # Circuit Data Extraction
+        processor = SDHCircuitProcessor(
+            Node=label,
+            driver=self.login_manager.driver,
+            db_query=self.db_query,
+            diag_username=self.login_manager.diag_username,
+            diag_passwords=self.login_manager.diag_passwords
+        )
+        processor.login_manager = self.login_manager
+        processor.extract_sdh_node_circuit_data()
+
+        logger.info("############## ADRS Data Extraction Process Started!!! ##############")
+        extractor = ADRSDataExtraction()
+        extractor.adrs_endpoint_extraction()
+        # logger.info("############## TU-AU Use Cases Data Extraction Process Started!!! ##############")
+        autucase = TUAUUseCaseDataExtraction()
+        autu_df = autucase.run()
+        logger.info("############## ADRS Data Extraction Process Ended !!! ##############")
+
+        logger.info("############ Capture Live & Non Live Initiated!!.############")
+        sdhcircuit_obj = processor
+        # label = "CHN_SAN_906_T1408_T" #290 Circuits
+        live_nlive = TejasLiveNonlive(sdhcircuit_obj, processor.login_manager)
+        # live_nlive.capture_live_nonlive(label)
+        m1_output_file_path = live_nlive.evaluate_endpoint_status(label)
+
+        self.db_query.put_circuit_summary_by_label(label)
+        df = self.db_query.get_circuit_summary_by_label(label)
+
+        if df is not None and not df.empty:
+            row = df.iloc[0]
+            adrs_scope = row['total_count'] - row['completed_count']
+            
+            logger.info(f"========== Circuit Summary for Label: {label} ==========")
+            logger.info(f"Total Circuits: {row['total_count']}")
+            logger.info(f"NMS Level End Points Found: {row['completed_count']}")
+            logger.info(f"ADRS_SCOPE Count (Derived): {adrs_scope}")
+            logger.info(f"Live Circuits: {row['live_count']}")
+            logger.info(f"Non-Live Circuits: {row['non_live_count']}")
+            logger.info(f"Unmanaged Circuits: {row['unmanaged_count']}")
+            logger.info(f"UME Manual Circuits: {row['ume_manual_count']}")
+            m1_end_time = time.perf_counter()
+            execution_time = m1_end_time - m1_start_time
+            formatted_time = str(timedelta(seconds=int(execution_time)))
+            logger.info(f"Execution Time (HH:MM:SS): {formatted_time}")
+            logger.info("=======================================================")
+
+        else:
+            logger.warning(f"No data found for label: {label}")
+
+        # generate output file
+        # if self.db_query.generate_m1_output(label):
+        #     logger.info("Extraction done")
+        # else:
+        #     logger.error("Extraction failed or no data found")
+
+        logger.info("##XX======== Data Extraction Module Completed!!.========XX##")
+        if m1_output_file_path:
+            return f"Output file generated in {m1_output_file_path}"
+
+
+
+    def m2_module(self, filepath):
+        logger.info("############ AIS Injection Module Initiated!!.############")
+
+        self.login_manager.get_config_data() # Tejas Login
+
+        # AIS Injection
+        injector = PostCrqAisInjector(
+        driver=self.login_manager.driver,
+        diag_username=self.login_manager.diag_username,
+        diag_passwords=self.login_manager.diag_passwords
+        )
+
+        # Inject login manager
+        injector.login_manager = self.login_manager
+        injector.main_process()
+        logger.info("##XX======== AIS Injection Module Completed!!.========XX##")
+
+    def m3_module(self, filepath):
+        logger.info("############ Non Live Circuits Deletion Module Initiated!!.############")
+        self.login_manager.get_config_data()
+        non_live_del = NonLiveCircuitDeletion(
+            driver=self.login_manager.driver,
+            db_query=self.db_query,
+            diag_username=self.login_manager.diag_username,
+            diag_passwords=self.login_manager.diag_passwords,
+            filepath=filepath)
+        non_live_del.login_manager = self.login_manager
+        non_live_del.main_process(filepath)
+        logger.info(f"Node {self.label} completed successfully")
+        logger.info("##XX======== Non Live Circuits Deletion Module Completed!!.========XX##")
+
+    def m4_module(self, filepath):
+        logger.info("############ Feasibility & Planning Module Initiated!!.############")
+        logger.info("##XX======== Feasibility & Planning Module Completed!!.========XX##")
+
+    def adrs_scope(self):
+        logger.info("############## ADRS Data Extraction Process Started!!! ##############")
+        extractor = ADRSDataExtraction()
+        extractor.adrs_endpoint_extraction()
+        logger.info("############## TU-AU Use Cases Data Extraction Process Started!!! ##############")
+        autucase = TUAUUseCaseDataExtraction()
+        autu_df = autucase.run()
+        logger.info("############## ADRS Data Extraction Process Ended !!! ##############")
+
+def main():
+    logger.info("############ Project pipeline started...############")
+    # label = "PUN_VCS_901_ME609_T"   #38 circuits    00:36:23
+    # label = "CHN_DLF_947_T1201_F"   #9 circuits   00:08:00
+    # label = "CHN_SAN_906_T1408_T"       #296 circuits 2:09:15
+    # label = "BGL_DLL_901_T6C03_T"   #282 circuits
+    # label = "BGL_DLL_901_T6C03_T"
+    label = "SLM_FAI_902_T6C02_B"
+
+    
+    pipeline = ProjectPipeline(label)
+    pipeline.m3_module(label)
+    logger.info("##XX======== Project pipeline completed successfully!!========XX##")
+
+
+if __name__ == "__main__":
+    main()
+
