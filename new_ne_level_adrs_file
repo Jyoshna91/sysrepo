@@ -219,7 +219,17 @@ class NeLevelDeletion:
                     "card": card,
                     "port": port,
                     "jklm": jklm,
-                    "priority": item.get("priority", False)
+                    "priority": item.get("priority", False),
+                    "SL.No": df.a[index, "SL.No"] if "SL.No" in df.columns else "",
+                    "Circuit Name": df.at[index, "Circuit Name"] if "Circuit Name" in df.columns else "",
+                    "Circuit Label": df.at[index, "Circuit Label"] if "Circuit Label" in df.columns else "",
+                    "Rate": df.at[index, "Rate"] if "Rate" in df.columns else "",
+                    "A End Node(Label)": a_node,
+                    "A End Port(Label)": a_port,
+                    "Z End Node(Label)": z_node,
+                    "Z End Port(Label)": z_port,
+                    "End NE": end_ne,
+                    "End CTP": end_ctp
                 })
 
         return processed_rows
