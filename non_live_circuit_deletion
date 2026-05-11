@@ -1067,14 +1067,10 @@ class NonLiveCircuitDeletion:
                     continue
                 if flow_status != "unavailable":
                     logger.info("LIVE traffic -> skipping deletion")
-                    results.append({
-                        "connection_id":connection_id,
-                        "node":node,
-                        "port":full_port,
-                        "logical_resource":logical_resource,
-                        "status":"SKIPPED",
-                        "remarks":"Live traffic present"
-                    })
+                    live_row = row.copy()
+                    live_row["status"] = "SKIPPED"
+                    live_row["remarks"] = "Lve traffic present"
+                    results.append(live_row)
                     continue
             status = None
             remarks = None
@@ -1134,14 +1130,9 @@ class NonLiveCircuitDeletion:
                 overall_status = True
                 remarks_list.append(f"{node}:{remarks}")
  
-            results.append({
-                "connection_id": connection_id,
-                "node": node,
-                "port": full_port,
-                "logical_resource": logical_resource,
-                "status": status,
-                "remarks": remarks
-            })
+            final_row = row.copy()
+            final_row["status"] = status
+            final_row["remarks"] = remarks
         try:
             self.driver.switch_to.window(manage_nodes_tab)
             self.driver.close()
