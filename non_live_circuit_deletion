@@ -24,10 +24,13 @@ from tejas_utils import *
 from common_libs.logger import logger
 from ne_level_adrs_deletion import NeLevelDeletion
 
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 BASE_DIR = Path(__file__).parent
 SS_DIR = Path(__file__).parent / "screenshots"
 EXPORT_DIR = Path(__file__).parent / "exports"
-ASSETS_DIR = Path(__file__).parent / "assets"
+ASSETS_DIR = Path(__file__).parent / "assets" / "non_live_circuit_deletion" 
+RUN_DIR = ASSETS_DIR / timestamp
+RUN_DIR.mkdir(parents=True, exist_ok=True)
 
 class NonLiveCircuitDeletion:
 
@@ -42,7 +45,7 @@ class NonLiveCircuitDeletion:
         self.filepath = filepath
         self.elements = []
         self.styles = getSampleStyleSheet()
-        self.current_pdf = str(SS_DIR / "final_output.pdf")
+        self.current_pdf = str(RUN_DIR / f"screenshots_{timestamp}.pdf")
 
     def home_page(self):
         wait = WebDriverWait(self.driver, 10)
@@ -193,7 +196,7 @@ class NonLiveCircuitDeletion:
         else:
             raise ValueError("Port string format is invalid")
 
-    def nms_level_deletion(self, row, index):
+    def nms_level_deletion(self, row, index, processed_db_ids):
         time.sleep(5)
         try:
             WebDriverWait(self.driver, 10).until(EC.visibility_of_element_located((By.ID, "userLabel")))
@@ -204,9 +207,13 @@ class NonLiveCircuitDeletion:
         circuit_id = str(row.get("connection_id", "")).strip().rstrip("_")
         tjs_id = str(row.get("tjs_id", "")).strip() if row.get("tjs_id") else ""
         service_name = str(row.get("service_name", "")).strip()
+        selected_node = str(row.get("selected_node", "")).strip().upper()
+        selected_port = str(row.get("selected_port", "")).strip().upper()
+        logger.info(f"[NMS INPUT] {selected_node} {selected_port}")
         if not tjs_id or tjs_id.lower() in ["", "none", "nan"]:
             logger.info(f"[SKIP NMS] tjs_id NULL -> Direct ADRS")
-            return{"status":"ADRS","service_name":service_name,"zone":row.get("zone"),"connection_id":circuit_id}
+            return{"status":"ADRS","service_name":service_name,"zone":row.get("zone"),"connection_id":circuit_id, "a_end":row.get("a_end"), "a_end_port":row.get("a_end_port"),
+                    "b_end":row.get("b_end"), "b_end_port":row.get("b_end_port"), "selected_node":row.get("selected_node"), "selected_port":row.get("selected_port") }
 
         self.current_connection_id = circuit_id
         a_node = str(row.get("a_end", "")).strip().upper()
@@ -238,6 +245,7 @@ class NonLiveCircuitDeletion:
                     logger.info("Skipping deletion (LIVE traffic)")
                     self.db_query.update_deletion_status(connection_id=circuit_id, status=False,
                                                          remarks="Circuit is Active - deletion skipped")
+                    processed_db_ids.append(row.get("id"))
                     self.devices_df.at[index, 'status'] = 'SKIPPED'
                     self.devices_df.at[index, 'remarks'] = "Circuit is Active"
                     return
@@ -316,6 +324,7 @@ class NonLiveCircuitDeletion:
                     status=False,
                     remarks="Circuit not found in Tejas Manage Circuits"
                 )
+                processed_db_ids.append(row.get("id"))
                 self.devices_df.at[index, 'status'] = 'FAILED'
                 self.devices_df.at[index, 'remarks'] = "Circuit not found in Tejas Manage circuits"
                 return
@@ -342,13 +351,6 @@ class NonLiveCircuitDeletion:
                         logger.info(f"Special state detected:{state}")
                         self.take_screenshot(f"Direct state-{label}")
 
-                    # if is_tejas:
-                    #     if circuit_id not in label:
-                    #         continue
-                    # else:
-                    #     if label != circuit_id:
-                    #         continue
-
                     if state not in allowed_states:
                         delete_flag = False
                         logger.info(f"State {state} not eligible for deletion")
@@ -357,12 +359,12 @@ class NonLiveCircuitDeletion:
                     valid_rows.append(r)
 
                 if not delete_flag:
-                    # logger.info(f"Circuit {circuit_id} not found in Manage Circuits")
                     self.db_query.update_deletion_status(
                         connection_id=circuit_id,
                         status=False,
                         remarks="State not eligible"
                     )
+                    processed_db_ids.append(row.get("id"))
                     self.devices_df.at[index, 'status'] = 'FAILED'
                     self.devices_df.at[index, 'remarks'] = "State not eligible"
                     return
@@ -415,8 +417,9 @@ class NonLiveCircuitDeletion:
                     self.db_query.update_deletion_status(
                         connection_id=circuit_id.strip(),
                         status=True,
-                        remarks="Deleted in NMS Level"
+                        remarks="Deleted NMS Level"
                     )
+                    processed_db_ids.append(row.get("id"))
                     self.devices_df.at[index, 'status'] = 'SUCCESS'
                     self.devices_df.at[index, 'remarks'] = "Deleted in NMS Level"
                     return "DONE"
@@ -431,6 +434,7 @@ class NonLiveCircuitDeletion:
                 status=False,
                 remarks=str(e)
             )
+            processed_db_ids.append(row.get("id"))
             self.devices_df.at[index, 'status'] = 'FAILED'
             self.devices_df.at[index, 'remarks'] = str(e)
             return "DONE"
@@ -463,21 +467,23 @@ class NonLiveCircuitDeletion:
         except Exception as e:
             logger.exception(f"PDF build failed: {e}")
 
-    def ne_level_deletion(self, node, card=None, port=None, stm=None, jklm=None, circuit_type="OPTICAL", mode="delete", connection_id="None", full_port=None):
+    def ne_level_deletion(self, node, card=None, port=None, stm=None, jklm=None, circuit_type="OPTICAL", mode="delete", connection_id="None", full_port=None, is_priority=False):
 
         wait = WebDriverWait(self.driver, 10)
         time.sleep(0.2)
         node_input = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[@class='dhx_combo_input']")))
         node_input.click()
-        time.sleep(2)
-        character_typing(node_input, node)
-        node_input.send_keys(Keys.ENTER)
+        time.sleep(0.2)
+        # character_typing(node_input, node)
+        # node_input.send_keys(Keys.ENTER)
         # node_input.click()
         # time.sleep(0.2)
-        # node_input.send_keys(Keys.CONTROL + "a")
-        # node_input.send_keys(Keys.BACKSPACE)
-        # time.sleep(1)
-        # node_input.send_keys(node)
+        node_input.send_keys(Keys.CONTROL + "a")
+        node_input.send_keys(Keys.BACKSPACE)
+        time.sleep(0.2)
+        node_input.send_keys(node)
+        time.sleep(0.3)
+        node_input.send_keys(Keys.ENTER)
         logger.info(f"Node entered: {node}")
         time.sleep(1)
         search_node = WebDriverWait(self.driver, 5).until(EC.element_to_be_clickable(
@@ -507,11 +513,23 @@ class NonLiveCircuitDeletion:
             logger.info("Alert accepted")
         except:
             logger.info("No alert present")
-        time.sleep(2)
-        # status = self.open_node_ne(self.global_node_ip, parent_window, node)
-        # if status == "failed":
-        #     logger.error(f"Skipping node:{node}")
-        #     return "failed"
+        time.sleep(0.2)
+        # try:
+        #     time.sleep(5)
+        #     # WebDriverWait(self.driver, 20).until(EC.visibility_of_element_located((By.NAME, "Username")))
+        #     WebDriverWait(self.driver, 20).until(lambda d:
+        #                                          d.find_elements(By.NAME, "Username") or 
+        #                                          d.find_elements(By.ID, "Uptime"))
+        #     if self.driver.find_elements(By.NAME, "Username"):
+        #         logger.info("Login page loaded normally")
+        #     elif self.driver.find_elements(By.ID, "Uptime"):
+        #         logger.inf("Node page already loaded (uptime detecetd)")
+        # except:
+        #     logger.warning("Username not found -> using open node ne fallback")
+        #     status = self.open_node_ne(self.global_node_ip, parent_window, node)
+        #     if status == "failed":
+        #         logger.error(f"Skipping node:{node}")
+        #         return "failed"
         
         self.handle_unexpected_alert()
         ensure_write_mode(self.driver, self.diag_username, self.diag_passwords)
@@ -523,14 +541,18 @@ class NonLiveCircuitDeletion:
         self.driver.switch_to.default_content()
         time.sleep(1)
         self.tejas_node_manager()
-        self.apply_cross_connect_filter(node,
+        result = self.apply_cross_connect_filter(node,
             card,
             port,
             stm if circuit_type == "OPTICAL" else None,
             jklm if circuit_type == "OPTICAL" else None,
             connection_id,
-            full_port
+            full_port,
+            is_priority=is_priority
         )
+        if result == "LIVE":
+            self.driver.close()
+            return "LIVE"
         self.driver.close()
         self.driver.switch_to.window(parent_window)
         self.driver.switch_to.default_content()
@@ -677,8 +699,10 @@ class NonLiveCircuitDeletion:
                 oper = str(status.get("operational", "")).lower()
                 cir = str(status.get("cir_status", "")).lower()
                 logger.info(f"DEBUG -> cir_status: {cir}, operational:{oper}")
-                if "non" in cir or "live" in cir:
+                if "non" in cir:
                     return "unavailable"
+                elif "live" in cir:
+                    return "available"
                 elif "down" in oper:
                     return "unavailable"
                 else:
@@ -744,9 +768,6 @@ class NonLiveCircuitDeletion:
             return row.get("b_end"), b_port
         return None, None
 
-    
-        
-
     def search_tejas_network(self, row):
         circuit_id = str(row.get("connection_id", "")).strip()
         a_node = str(row.get("a_end", "")).strip()
@@ -766,13 +787,9 @@ class NonLiveCircuitDeletion:
             else:
                 node = a_node
                 port_value = a_port_value
-
-
-        # port_value = port_value.upper()
         parts = port_value.split("-")
 
         port = "-".join(parts[:4])
-        # timeslot = "-".join(parts[4:])
         if port_value.startswith("STM") and len(parts) > 4:
             timeslot = "-".join(parts[4:])
         else:
@@ -784,11 +801,9 @@ class NonLiveCircuitDeletion:
         node_input = wait.until(
             EC.element_to_be_clickable((By.XPATH, "(//input[@class='dhx_combo_input'])[1]"))
         )
-        # # character_typing(node_input, node)
         node_input.send_keys(node)
         time.sleep(2)
         node_input.send_keys(Keys.ENTER)
-        # print(f"Node entered: {node}")
         time.sleep(2)
 
         port_input = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[@id='tpBrowser']")))
@@ -798,18 +813,14 @@ class NonLiveCircuitDeletion:
         search_box = WebDriverWait(self.driver, 5).until(
             EC.visibility_of_element_located((By.XPATH, "//div[contains(text(),'TejNms')]/following::input[1]"))
         )
-        # character_typing(search_box, port)
         search_box.send_keys(port)
         time.sleep(0.5)
         search_box.send_keys(Keys.ENTER)
-        # print(f"STM entered: {port}")
         time.sleep(1)
         port = port.strip()
-        # print("port from DB: ", port)
         stm_element = WebDriverWait(self.driver, 20).until(
             EC.element_to_be_clickable((By.XPATH, f"//div[@class='objbox']//span[text()='{port}']")))
         self.driver.execute_script("arguments[0].click();", stm_element)
-        # print(f"STM clicked: {stm_element}")
 
         ok_btn = WebDriverWait(self.driver, 10).until(EC.element_to_be_clickable((By.XPATH, "//*[@id='win_ok']")))
         ok_btn.click()
@@ -817,7 +828,6 @@ class NonLiveCircuitDeletion:
         if timeslot:
             timeslot_input = WebDriverWait(self.driver, 10).until(
                 EC.visibility_of_element_located((By.XPATH, "//*[@id='timeslot']")))
-            # character_typing(timeslot_input, timeslot)
             timeslot_input.send_keys(timeslot)
             time.sleep(0.5)
             timeslot_input.send_keys(Keys.ENTER)
@@ -860,7 +870,7 @@ class NonLiveCircuitDeletion:
         self.driver.switch_to.default_content()
         WebDriverWait(self.driver, 10).until(EC.frame_to_be_available_and_switch_to_it((By.NAME, "nodeBodyFrame")))
 
-    def apply_cross_connect_filter(self, node, card, port, stm, jklm, connection_id, full_port):
+    def apply_cross_connect_filter(self, node, card, port, stm, jklm, connection_id, full_port, is_priority=False):
         time.sleep(3)
         wait = WebDriverWait(self.driver, 10)
         self.node_body_frame()
@@ -926,7 +936,6 @@ class NonLiveCircuitDeletion:
 
                 if option_text == j:
                     select_stmno.select_by_visible_text(option_text)
-                    # print("selected STMNo:", option_text)
                     found = True
                     break
 
@@ -977,6 +986,11 @@ class NonLiveCircuitDeletion:
             logger.info("Checkbox clicked")
             self.take_screenshot(f"NE Level Deletion - {node} - {full_port}")
             time.sleep(1)
+            if is_priority:
+                logger.info(f"LIVE circuit found in AIS injected node {node}")
+                self.take_screenshot(f"LIVE CIRCUIT - {node} - {full_port}")
+                return "LIVE"
+            self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", checkbox)
             # ------------------Click delete selected connections-----------
             delete_button = wait.until(EC.element_to_be_clickable(
                 (By.XPATH, "//input[@type='SUBMIT' and @value='Delete selected connection(s)']")))
@@ -992,7 +1006,7 @@ class NonLiveCircuitDeletion:
             logger.warning("No circuits found for this node. Proceeding to next node.")
             return
 
-    def process_csv_nodes(self, processed_rows, connection_id):
+    def process_csv_nodes(self, processed_rows, connection_id, processed_db_ids):
         time.sleep(5)
         results = []
         overall_status = False
@@ -1002,6 +1016,7 @@ class NonLiveCircuitDeletion:
         WebDriverWait(self.driver, 5).until(EC.presence_of_element_located((By.XPATH, "//input[@class='dhx_combo_input']")))
         manage_nodes_tab = self.driver.current_window_handle
         processed_keys = set()
+        processed_rows = sorted(processed_rows, key=lambda x : x.get("priority", False), reverse=True)
         for row in processed_rows:
             key = f"{row['node']}_{row['card']}_{row['port']}_{row['jklm']}"
             if key in processed_keys:
@@ -1015,9 +1030,38 @@ class NonLiveCircuitDeletion:
             full_port = row["full_port"]
             logical_resource = row["logical_resource"]
             port_upper = str(full_port).upper()
+            node_data = self.db_query.get_device_manufacturer(node)
+
+            if not node_data:
+                logger.info(f"[FILTER] {node} -> UNKNOWN")
+                results.append({
+                    "connection_id":connection_id,
+                        "node":node,
+                        "port":full_port,
+                        "logical_resource":logical_resource,
+                        "status":"SKIPPED",
+                        "remarks":"UNKNOWN"
+                })
+                continue
+            manufacturer = node_data["manufacturer"]
+            zone = node_data["zone"]
+            if manufacturer.upper() != "TEJAS":
+                logger.info(f"[FILTER] {node} -> {node_data} (no login)")
+                results.append({
+                    "connection_id":connection_id,
+                        "node":node,
+                        "port":full_port,
+                        "logical_resource":logical_resource,
+                        "status":manufacturer.upper(),
+                        "remarks":manufacturer.upper()
+                        })
+                continue
+            self.login_manager.current_zone = zone
+            logger.info(f"[FILTER] {node} -> TEJAS (processing) | {zone}")
             if "E1" in port_upper or "VCG" in port_upper:
                 logger.info(f"[NE PRECHECK] node: {node}, port:{full_port}")
                 flow_status = self.check_traffic_flow(node, full_port)
+                logger.info(f"Flow status for {node}: {flow_status}")
                 if flow_status == "failed":
                     logger.error("Node open failed -> skipping")
                     continue
@@ -1034,6 +1078,7 @@ class NonLiveCircuitDeletion:
                     continue
             status = None
             remarks = None
+            is_priority = row.get("priority", False)
             try:
                 time.sleep(2)
                 if jklm:
@@ -1044,7 +1089,8 @@ class NonLiveCircuitDeletion:
                         stm=str(jklm).split("-")[0],
                         jklm=jklm,
                         full_port=full_port,
-                        circuit_type="OPTICAL"
+                        circuit_type="OPTICAL",
+                        is_priority=is_priority
                     )
                 else:
                     time.sleep(2)
@@ -1055,43 +1101,39 @@ class NonLiveCircuitDeletion:
                         stm=None,
                         jklm=None,
                         full_port=full_port,
-                        circuit_type="ETH"
+                        circuit_type="ETH",
+                        is_priority=is_priority
                     )
-                    
-                if result == "success":
-                    status = "DELETED"
+                logger.info(f"[NE RESULT] {result}")
+                if result == "LIVE":
+                    logger.info(f"[STOP PROCESSING] live circuit found for {connection_id}")
+                    status = "FAILED"
+                    remarks = "Live circuit found"
+                    overall_status = False
+                    break
+                   
+                elif result == "success":
+                    status = "TEJAS"
                     remarks = "Deleted successfully"
-
-                elif result == "unmanaged":
-                    status = "UNMANAGED"
-                    remarks = "Tejas Unmanaged Node"
-
-                elif result == "not found":
-                    status = "OTHER_NMS"
-                    remarks = "Belongs to other NMS"
-
+                    overall_status = True
                 else:
-                    status = "PENDING"
-                    remarks = f"Unexpected result: {result}"
-            
-
+                    status = "TEJAS"
+                    remarks = "FAILED"
+           
             except Exception as e:
-                if "not found" in str(e).lower():
-                    status = "OTHER_NMS"
-                    remarks = "Belongs to other NMS"
-                else:
-                    status = "PENDING"
-                    remarks = str(e)
+                logger.info(f"Error in deletion for {node}:{e}")
+                status = "TEJAS"
+                remarks = "Deletion Failed"
             finally:
                 try:
                    self.driver.switch_to.window(manage_nodes_tab)
                    self.driver.switch_to.default_content()
                 except Exception as e:
                     logger.warning(f"Tab switch failed:{e}")
-            if status != "DELETED":
+            if status != "Deleted successfully":
                 overall_status = True
                 remarks_list.append(f"{node}:{remarks}")
-
+ 
             results.append({
                 "connection_id": connection_id,
                 "node": node,
@@ -1108,23 +1150,36 @@ class NonLiveCircuitDeletion:
             logger.warning(f"Final tab cleanup failed:{e}")
         # ---------------- SAVE CSV ----------------
         df_result = pd.DataFrame(results)
-        file_path = f"screenshots/ne_level_deletion_results.csv"
+        file_path = RUN_DIR / f"ne_level_deletion_results_{timestamp}.csv"
         if os.path.exists(file_path):
             df_old = pd.read_csv(file_path)
             df_result = pd.concat([df_old, df_result], ignore_index=True)
         df_result = df_result.drop_duplicates(subset=["connection_id", "node", "port"])
-
+ 
         df_result.to_csv(file_path, index=False)
         logger.info(f"[DONE] Results saved to {file_path}")
-        final_remark = " | ".join(remarks_list) if remarks_list else "Tejas nodes deleted successfully"
+        # final_remark = " | ".join(remarks_list) if remarks_list else "Tejas nodes deleted successfully"
+        if overall_status:
+            final_remark = "Deleted Successfully"
+        else:
+            final_remark = "Live circuit found"
         self.db_query.update_deletion_status(connection_id=str(connection_id.strip()),
                                                                status=overall_status,
                                                                remarks=final_remark)
+        processed_db_ids.append(row.get("id"))
         self.devices_df.loc[self.devices_df['connection_id'] == connection_id, 'status'] = 'SUCCESS' if overall_status else 'FAILED'
         self.devices_df.loc[self.devices_df['connection_id'] == connection_id, 'remarks'] = final_remark
-
-
+ 
+ 
         return results
+
+    def is_tejas_node(self, node):
+        manufacturer = self.db_query.get_device_manufacturer(node)
+        if manufacturer == "TEJAS":
+            logger.info(f"[FILTER] {node} -> TEJAS found")
+            return None
+        logger.info(f"[FILTER] {node} -> {manufacturer} skipping")
+        return False
 
 
     def l2_eth_card(self, port_number, node, vcg_flow):
@@ -1376,9 +1431,12 @@ class NonLiveCircuitDeletion:
         total_records = len(self.devices_df)
         print("Total nodes:", total_records)
         csv_processor = NeLevelDeletion(self.db_query)
+        processed_db_ids = []
         for index, row in self.devices_df.iterrows():
             label = row.get("label")
             connection_id = row.get("connection_id")
+            db_id = self.db_query.get_non_live_row(connection_id)
+            processed_db_ids.append(str(db_id))
             tjs_id = str(row.get("tjs_id", "")).strip()
             service_name = str(row.get("service_name", "")).strip()
             zone = row.get("zone")
@@ -1390,12 +1448,12 @@ class NonLiveCircuitDeletion:
             try:
                 if self.driver is None:
                     self.driver = self.login_manager.process_node(row)
-                result = self.nms_level_deletion(row, index)
+                result = self.nms_level_deletion(row, index, processed_db_ids)
                 if isinstance(result, dict) and result.get("status", "").strip().upper() == "ADRS":
                     logger.info(f"[ADRS FLOW] Processing {connection_id}")
                     csv_path = csv_processor.run(input_data=result)
                     if csv_path:
-                        self.process_csv_nodes(csv_path, connection_id)
+                        self.process_csv_nodes(csv_path, connection_id, processed_db_ids)
             except Exception as e:
                 logger.exception(f"Node failed: {label} due to {e}")
             logger.info("_" * 80)
@@ -1405,8 +1463,12 @@ class NonLiveCircuitDeletion:
             total_time = round(end_time - start_time, 2)
             logger.info(f"Circuit {connection_id} took {total_time} seconds")
         logger.info("Tejas Automation run completed")
-        output_path = ASSETS_DIR / "final_output.csv"
-        self.devices_df.to_csv(output_path, index=False)
+        output_path = RUN_DIR / f"final_results_{timestamp}.csv"
+        final_df = self.db_query.get_final_non_live_data(processed_db_ids)
+        if final_df is not None and not final_df.empty:
+            final_df.to_csv(output_path, index=False)
+        else:
+            logger.warning("NO DATA FOUND")
         self.finalize_pdf()
         if self.driver:
             self.driver.quit()
