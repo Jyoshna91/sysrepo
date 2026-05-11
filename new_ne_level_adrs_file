@@ -1,4 +1,3 @@
-
 import os
 import re
 
@@ -71,7 +70,7 @@ class NeLevelDeletion:
                 "z_node": r.get("Z End Node(Label)"),
                 "z_port": r.get("Z End Port(Label)"),
                 "logical_resource": r.get("Logical Resource"),
-                "end_ne": r.get("End NE"),
+                "end_ne": r.get("End NE"),  
                 "end_ctp": r.get("End CTP")
             })
 
@@ -79,13 +78,18 @@ class NeLevelDeletion:
         df_new = df_new.drop_duplicates()
         return df_new
 
-    def process_extracted_csv(self, df, connection_id):
+    def process_extracted_csv(self, df, input_data):
 
         processed_rows = []
         previous_keys = set()
+        # logger.info(f"INPUT DATA KEYS:{input_data.keys()}")
+        # logger.info(f"FULL INPUT DATA:{input_data}")
+        connection_id = input_data.get("connection_id")
+        excel_node = str(input_data.get("selected_node", "")).strip().upper()
+        excel_port = str(input_data.get("selected_port", "")).strip().upper()
+        excel_port = "-".join(excel_port.split("-")[:4])
 
         for index in df.index:
-
             a_node = df.at[index, "a_node"]
             a_port = str(df.at[index, "a_port"]).strip()
             z_node = df.at[index, "z_node"]
@@ -93,6 +97,7 @@ class NeLevelDeletion:
             logical_resource = str(df.at[index, "logical_resource"]).strip()
             end_ne = str(df.at[index, "end_ne"]).strip()
             end_ctp = str(df.at[index, "end_ctp"]).strip()
+          
             nodes_to_process = []
 
             if a_node and a_node != "nan" and not a_node.upper().startswith("VNE"):
@@ -114,15 +119,22 @@ class NeLevelDeletion:
                         "node": end_ne,
                         "port": end_ctp
                     })
-            logger.info(f"Total nodes_to_process:{len(nodes_to_process)}")
-            for n in nodes_to_process:
-                logger.info(f"Node added:{n}")
+            
+            
 
             for item in nodes_to_process:
+                item_node = str(item["node"]).strip().upper()
+                item_port = str(item["port"]).strip().upper()
+                item["priority"] = False
+                logger.info(f"EXCEL: {excel_node} | {excel_port}")
+                logger.info(f"ITEM: {item_node} | {item_port}")
+                if item_node == excel_node and item_port == excel_port:
+                    logger.info(f"MATCHED: {item_node} | {item_port}")
+                    item["priority"] = True
+
                 node = item["node"]
                 port_val = item["port"]
                 logical = item.get("logical_resource","")
-                key= f"{index}_{node}_{port_val}"
                 card = None
                 port = None
                 jklm = None
@@ -191,10 +203,13 @@ class NeLevelDeletion:
                 except Exception as e:
                     print(f"Error parsing row {index}: {e}")
                     continue
-                key = (node, card, port, jklm)
-                if key in previous_keys:
-                    continue
-                previous_keys.add(key)
+                node_key = str(node).strip().upper()
+                if not item.get("priority"):
+                    if node_key in previous_keys:
+                        logger.info(f"[DUPLICATE NODE SKIPPED] {node_key}")
+                        continue
+                previous_keys.add(node_key)
+                logger.info(f"[PRIORITY DEBUG] node={node}, full_port={port_val}, priority={item.get('priority')}")
 
                 processed_rows.append({
                     "connection_id": connection_id,
@@ -203,7 +218,8 @@ class NeLevelDeletion:
                     "logical_resource": logical_resource,
                     "card": card,
                     "port": port,
-                    "jklm": jklm
+                    "jklm": jklm,
+                    "priority": item.get("priority", False)
                 })
 
         return processed_rows
@@ -215,7 +231,7 @@ class NeLevelDeletion:
                 return None
             processed_data = self.process_extracted_csv(
                 df,
-                input_data.get("connection_id")
+                input_data
             )
             return processed_data
         except Exception as e:
