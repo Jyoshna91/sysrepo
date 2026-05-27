@@ -262,8 +262,13 @@ class NonLiveCircuitDeletion:
         if not tjs_id or tjs_id.lower() in ["", "none", "nan"]:
             if has_vcg_e1:
                 logger.info("VCG/E1/STM found -> checking traffic before ADRS")
-                flow_status = self.check_traffic_flow(node, port, other_node, other_port)
-                logger.info(f"flow status: {flow_status}")
+                if "STM" in str(port).upper():
+                    logger.info("STM detected -> cross connection")
+                    flow_status = self.check_stm_traffic_status(node, port)
+                else:
+                    logger.info("E1/VCG detected -> current interval")
+                    flow_status = self.check_traffic_flow(node, port, other_node, other_port)
+                    logger.info(f"flow status: {flow_status}")
                 if flow_status == "failed":
                     logger.error("Traffic check failed")
                     return
@@ -295,21 +300,32 @@ class NonLiveCircuitDeletion:
                 logger.info(f"VCG/E1/STM found -> Node: {node}, Port: {port}")
                 time.sleep(1)
                 if "STM" in str(port).upper():
-                    logger.info("STM detected -> going to cross connections")
-                    flow_status = self.check_stm_traffic_status(node, port)
+                    logger.info("STM detected -> going CROSS CONNECTION")
+                    flow_status = self.check_stm_traffic_status(
+                        node,
+                        port
+                    )
                 else:
-                    logger.info("VCG/E1 detected -> going to current interval")
-                    flow_status = self.check_traffic_flow(node, port, other_node, other_port)
-                    logger.info(f"Flow: {flow_status}")
-                    if flow_status == "failed":
-                        logger.error(f"Node {node} failed")
-                        return
-                    if flow_status != "unavailable":
-                        logger.info("Skipping deletion (LIVE traffic)")
-                        self.db_query.update_deletion_status(connection_id=circuit_id, status=False,
-                                                            remarks="Circuit is Active - deletion skipped")
-                        processed_db_ids.append(row.get("id"))
-                        return
+                    logger.info("VCG/E1 detected -> CURRENT INTERVAL")
+                    flow_status = self.check_traffic_flow(
+                        node,
+                        port,
+                        other_node,
+                        other_port
+                    )
+                logger.info(f"FLOW STATUS = {flow_status}")
+                if flow_status == "failed":
+                    logger.error("Traffic check failed")
+                    return
+                if flow_status != "unavailable":
+                    logger.info("LIVE TRAFFIC PRESENT")
+                    self.db_query.update_deletion_status(
+                        connection_id=circuit_id,
+                        status=False,
+                        remarks="Circuit is Active - deletion skipped"
+                    )
+                    processed_db_ids.append(row.get("id"))
+                    return
             else:
                 logger.info("No VCG -> normal deletion")
 
@@ -504,7 +520,7 @@ class NonLiveCircuitDeletion:
     def ne_level_deletion(self, node, card=None, port=None, stm=None, jklm=None, circuit_type="OPTICAL", mode="delete", connection_id="None", full_port=None, is_priority=False):
 
         wait = WebDriverWait(self.driver, 10)
-        time.sleep(2)
+        time.sleep(5)
         node_input = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[@class='dhx_combo_input']")))
         node_input.click()
         time.sleep(0.2)
@@ -817,36 +833,143 @@ class NonLiveCircuitDeletion:
                 f"STM={stm}, "
                 f"JKLM={jklm}"
             )
-            result = self.ne_level_deletion(node=node,card=card,port=port_no,stm=stm,jklm=jklm,circuit_type="OPTICAL",mode="traffic_check")
-            try:
-                self.driver.close()
-                self.driver.switch_to.window(
-                    self.driver.window_handles[0])
-            except:
-                pass
+
+            main_tab = self.driver.current_window_handle
+            self.open_manage_nodes()
+            manage_nodes_tab = self.driver.current_window_handle
+            open_status = self.ne_level_deletion(
+                node=node,
+                mode="flow_check"
+            )
+            if open_status == "failed":
+                return "failed"
+            WebDriverWait(self.driver, 10).until(
+                lambda d: len(d.window_handles) > 1
+            )
+            node_tab = self.driver.window_handles[-1]
+            self.driver.switch_to.window(node_tab)
+            self.driver.switch_to.default_content()
+            self.tejas_node_manager()
+            result = self.apply_cross_connect_filter(
+                node=node,
+                card=card,
+                port=port_no,
+                stm=stm,
+                jklm=jklm,
+                connection_id=None,
+                full_port=port,
+                mode="traffic_check"
+            )
+            self.driver.close()
+            self.driver.switch_to.window(manage_nodes_tab)
+            self.driver.close()
+            self.driver.switch_to.window(main_tab)
             return result
         except Exception as e:
-            logger.error(f"STM traffic check failed: {e}")
+            logger.error(f"STM traffic check fa iled: {e}")
             return "available"
 
     def get_vcg_node_and_port(self, row):
-        a_node = str(row.get("a_end", "")).strip()
-        b_node = str(row.get("b_end", "")).strip()
-        a_port = str(row.get("a_end_port", "")).upper()
-        b_port = str(row.get("b_end_port", "")).upper()
-        if "E1" in str(a_port).upper():
+
+        a_node = str(row.get("a_end", "")).strip().upper()
+        b_node = str(row.get("b_end", "")).strip().upper()
+
+        a_port = str(row.get("a_end_port", "")).strip().upper()
+        b_port = str(row.get("b_end_port", "")).strip().upper()
+
+        logger.info(f"A-END = {a_node} | {a_port}")
+        logger.info(f"B-END = {b_node} | {b_port}")
+
+        # PRIORITY 1 -> E1
+
+        if "E1" in a_port:
+            logger.info("E1 found in A-END")
             return a_node, a_port, b_node, b_port
-        if "E1" in str(b_port).upper():
+
+        if "E1" in b_port:
+            logger.info("E1 found in B-END")
             return b_node, b_port, a_node, a_port
-        if "VCG" in str(a_port).upper():
+
+        # PRIORITY 2 -> VCG
+
+        if "VCG" in a_port:
+            logger.info("VCG found in A-END")
             return a_node, a_port, b_node, b_port
-        if "VCG" in str(b_port).upper():
+
+        if "VCG" in b_port:
+            logger.info("VCG found in B-END")
             return b_node, b_port, a_node, a_port
-        if "STM" in str(a_port).upper():
+
+        # PRIORITY 3 -> STM
+
+        if "STM" in a_port:
+            logger.info("STM found in A-END")
             return a_node, a_port, b_node, b_port
-        if "STM" in str(b_port).upper():
+
+        if "STM" in b_port:
+            logger.info("STM found in B-END")
             return b_node, b_port, a_node, a_port
+
+        logger.info("No E1/VCG/STM found")
+
         return None, None, None, None
+    # def get_vcg_node_and_port(self, row):
+
+    #     a_node = str(row.get("a_end", "")).strip()
+    #     b_node = str(row.get("b_end", "")).strip()
+
+    #     a_port = str(row.get("a_end_port", "")).strip().upper()
+    #     b_port = str(row.get("b_end_port", "")).strip().upper()
+
+    #     selected_node = str(row.get("selected_node", "")).strip()
+    #     selected_port = str(row.get("selected_port", "")).strip().upper()
+
+    #     logger.info(f"A_PORT: {repr(a_port)}")
+    #     logger.info(f"B_PORT: {repr(b_port)}")
+    #     logger.info(f"SELECTED_PORT: {repr(selected_port)}")
+
+    #     # ---------------- E1 PRIORITY ----------------
+    #     if "E1" in a_port:
+    #         logger.info("E1 detected in A-END")
+    #         return a_node, a_port, b_node, b_port
+
+    #     if "E1" in b_port:
+    #         logger.info("E1 detected in B-END")
+    #         return b_node, b_port, a_node, a_port
+
+    #     if "E1" in selected_port:
+    #         logger.info("E1 detected in SELECTED_PORT")
+    #         return selected_node, selected_port, None, None
+
+    #     # ---------------- VCG PRIORITY ----------------
+    #     if "VCG" in a_port:
+    #         logger.info("VCG detected in A-END")
+    #         return a_node, a_port, b_node, b_port
+
+    #     if "VCG" in b_port:
+    #         logger.info("VCG detected in B-END")
+    #         return b_node, b_port, a_node, a_port
+
+    #     if "VCG" in selected_port:
+    #         logger.info("VCG detected in SELECTED_PORT")
+    #         return selected_node, selected_port, None, None
+
+    #     # ---------------- STM PRIORITY ----------------
+    #     if "STM" in a_port:
+    #         logger.info("STM detected in A-END")
+    #         return a_node, a_port, b_node, b_port
+
+    #     if "STM" in b_port:
+    #         logger.info("STM detected in B-END")
+    #         return b_node, b_port, a_node, a_port
+
+    #     if "STM" in selected_port:
+    #         logger.info("STM detected in SELECTED_PORT")
+    #         return selected_node, selected_port, None, None
+
+    #     logger.info("No E1/VCG/STM found")
+
+    #     return None, None, None, None
 
     def search_tejas_network(self, row):
         circuit_id = str(row.get("connection_id", "")).strip()
