@@ -537,7 +537,7 @@ class NonLiveCircuitDeletion:
                           full_port=None, is_priority=False):
 
         wait = WebDriverWait(self.driver, 10)
-        time.sleep(5)
+        time.sleep(8)
         node_input = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[@class='dhx_combo_input']")))
         node_input.click()
         time.sleep(0.2)
@@ -745,7 +745,7 @@ class NonLiveCircuitDeletion:
         except:
             return False
 
-    def check_traffic_flow(self, node, port, other_node, other_port):
+    def check_traffic_flow(self, node, port, other_node, other_port, is_opposite=False):
         main_tab = self.driver.current_window_handle
         self.open_manage_nodes()
         time.sleep(2)
@@ -773,6 +773,8 @@ class NonLiveCircuitDeletion:
                     return "unavailable"
                 elif "live" in cir:
                     logger.info(f"{port} is LIVE")
+                    if is_opposite:
+                        return "available"
                     opposite_status = self.check_opposite_side(other_node, other_port)
                     return opposite_status
                 elif "down" in oper:
@@ -809,6 +811,8 @@ class NonLiveCircuitDeletion:
                 return "unavailable"
             else:
                 logger.info(f"{port} is LIVE")
+                if is_opposite:
+                    return "available"
                 opposite_status = self.check_opposite_side(other_node, other_port)
                 return opposite_status
 
@@ -821,22 +825,29 @@ class NonLiveCircuitDeletion:
             self.driver.close()
             self.driver.switch_to.window(main_tab)
     
-    def check_opposite_side(self,node,port):
-        logger.info(f"Checking opposite side: {node} | {port}")
+    # def check_opposite_side(self,node,port):
+    #     logger.info(f"Checking opposite side: {node} | {port}")
+    #     port_upper = str(port).upper()
+    #     if "STM" in port_upper:
+    #         return self.check_stm_traffic_status(node,port)
+    #     elif "E1" in port_upper:
+    #         cir = self.l1_e1_card(node,port)
+    #         if "non" in str(cir).lower():
+    #             return "unavailable"
+    #         return "available"
+    #     elif ("VCG" in port_upper or "ETH" in port_upper):
+    #         cir = self.l1_eth_card(node,port)
+    #         if "non" in str(cir).lower():
+    #             return "unavailable"
+    #         return "available"
+    #     return "available"
+    def check_opposite_side(self, node, port):
+        logger.info(f"checking opposite side: {node}")
         port_upper = str(port).upper()
         if "STM" in port_upper:
-            return self.check_stm_traffic_status(node,port)
-        elif "E1" in port_upper:
-            cir = self.l1_e1_card(node,port)
-            if "non" in str(cir).lower():
-                return "unavailable"
-            return "available"
-        elif ("VCG" in port_upper or "ETH" in port_upper):
-            cir = self.l1_eth_card(node,port)
-            if "non" in str(cir).lower():
-                return "unavailable"
-            return "available"
-        return "available"
+            return self.check_stm_traffic_status(node, port)
+        else:
+            return self.check_traffic_status_flow(node, port, None, None)
     
     def check_stm_traffic_status(self,node,port):
         logger.info(f"Checking STM traffic: {node} | {port}")
@@ -1147,13 +1158,13 @@ class NonLiveCircuitDeletion:
             rows = wait.until(EC.presence_of_all_elements_located((By.XPATH,"//table[@width='95%' and @border='1']//tr[position()>1]")))
             for row in rows:
                 cols = row.find_elements(By.TAG_NAME, "td")
+                self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});",row)
+                time.sleep(1)
+                self.take_screenshot(f"STM_STATUS_{node}_{port}")
                 if len(cols) < 9:
                     continue
                 source_status = cols[3].text.strip().upper()
                 dest_status = cols[8].text.strip().upper()
-                logger.info(
-                    f"SOURCE={source_status}, DEST={dest_status}"
-                )
                 if (source_status == "UP" and dest_status == "UP"):
                     logger.info("STM LIVE")
                     return "available"
