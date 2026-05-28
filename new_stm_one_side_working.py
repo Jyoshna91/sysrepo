@@ -265,7 +265,18 @@ class NonLiveCircuitDeletion:
                 logger.info("VCG/E1/STM found -> checking traffic before ADRS")
                 if "STM" in str(port).upper():
                     logger.info("STM detected -> cross connection")
-                    flow_status = self.check_stm_traffic_status(node, port)
+                    source_status = self.check_stm_traffic_status(node, port)
+                    logger.info(f"First end status = {source_status}")
+                    if source_status == "available":
+                        logger.info("checking other end stm")
+                        other_status = self.check_stm_traffic_status(other_node, other_port)
+                        logger.info(f"Second end status = {other_status}")
+                        if other_status == "available":
+                            flow_status = "available"
+                        else:
+                            flow_status = "unavailable"
+                    else:
+                        flow_status = "unavailable"
                 else:
                     logger.info("E1/VCG detected -> current interval")
                     flow_status = self.check_traffic_flow(node, port, other_node, other_port)
@@ -301,19 +312,22 @@ class NonLiveCircuitDeletion:
                 logger.info(f"VCG/E1/STM found -> Node: {node}, Port: {port}")
                 time.sleep(1)
                 if "STM" in str(port).upper():
-                    logger.info("STM detected -> going CROSS CONNECTION")
-                    flow_status = self.check_stm_traffic_status(
-                        node,
-                        port
-                    )
+                    logger.info("STM detected -> cross connection")
+                    source_status = self.check_stm_traffic_status(node, port)
+                    logger.info(f"First end status = {source_status}")
+                    if source_status == "available":
+                        logger.info("checking other end stm")
+                        other_status = self.check_stm_traffic_status(other_node, other_port)
+                        logger.info(f"Second end status = {other_status}")
+                        if other_status == "available":
+                            flow_status = "available"
+                        else:
+                            flow_status = "unavailable"
+                    else:
+                        flow_status = "unavailable"
                 else:
                     logger.info("VCG/E1 detected -> CURRENT INTERVAL")
-                    flow_status = self.check_traffic_flow(
-                        node,
-                        port,
-                        other_node,
-                        other_port
-                    )
+                    flow_status = self.check_traffic_flow(node,port,other_node,other_port)
                 logger.info(f"FLOW STATUS = {flow_status}")
                 if flow_status == "failed":
                     logger.error("Traffic check failed")
@@ -918,63 +932,6 @@ class NonLiveCircuitDeletion:
         logger.info("No E1/VCG/STM found")
 
         return None, None, None, None
-    # def get_vcg_node_and_port(self, row):
-
-    #     a_node = str(row.get("a_end", "")).strip()
-    #     b_node = str(row.get("b_end", "")).strip()
-
-    #     a_port = str(row.get("a_end_port", "")).strip().upper()
-    #     b_port = str(row.get("b_end_port", "")).strip().upper()
-
-    #     selected_node = str(row.get("selected_node", "")).strip()
-    #     selected_port = str(row.get("selected_port", "")).strip().upper()
-
-    #     logger.info(f"A_PORT: {repr(a_port)}")
-    #     logger.info(f"B_PORT: {repr(b_port)}")
-    #     logger.info(f"SELECTED_PORT: {repr(selected_port)}")
-
-    #     # ---------------- E1 PRIORITY ----------------
-    #     if "E1" in a_port:
-    #         logger.info("E1 detected in A-END")
-    #         return a_node, a_port, b_node, b_port
-
-    #     if "E1" in b_port:
-    #         logger.info("E1 detected in B-END")
-    #         return b_node, b_port, a_node, a_port
-
-    #     if "E1" in selected_port:
-    #         logger.info("E1 detected in SELECTED_PORT")
-    #         return selected_node, selected_port, None, None
-
-    #     # ---------------- VCG PRIORITY ----------------
-    #     if "VCG" in a_port:
-    #         logger.info("VCG detected in A-END")
-    #         return a_node, a_port, b_node, b_port
-
-    #     if "VCG" in b_port:
-    #         logger.info("VCG detected in B-END")
-    #         return b_node, b_port, a_node, a_port
-
-    #     if "VCG" in selected_port:
-    #         logger.info("VCG detected in SELECTED_PORT")
-    #         return selected_node, selected_port, None, None
-
-    #     # ---------------- STM PRIORITY ----------------
-    #     if "STM" in a_port:
-    #         logger.info("STM detected in A-END")
-    #         return a_node, a_port, b_node, b_port
-
-    #     if "STM" in b_port:
-    #         logger.info("STM detected in B-END")
-    #         return b_node, b_port, a_node, a_port
-
-    #     if "STM" in selected_port:
-    #         logger.info("STM detected in SELECTED_PORT")
-    #         return selected_node, selected_port, None, None
-
-    #     logger.info("No E1/VCG/STM found")
-
-    #     return None, None, None, None
 
     def search_tejas_network(self, row):
         circuit_id = str(row.get("connection_id", "")).strip()
